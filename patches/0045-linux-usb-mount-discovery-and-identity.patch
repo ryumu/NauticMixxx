@@ -1,0 +1,630 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2142,6 +2142,7 @@
+     src/test/rekordboxruntimecatalog_test.cpp
+     src/test/rekordboxdatabase_test.cpp
+     src/test/rekordboxdevice_test.cpp
++    src/test/rekordboxdiscovery_test.cpp
+     src/test/rx3display_test.cpp
+     src/test/rx3beatfx_test.cpp
+     src/test/soundreconfiguration_test.cpp
+diff --git a/src/library/rekordbox/rekordboxdevice.cpp b/src/library/rekordbox/rekordboxdevice.cpp
+--- a/src/library/rekordbox/rekordboxdevice.cpp
++++ b/src/library/rekordbox/rekordboxdevice.cpp
+@@ -211,6 +211,21 @@
+     return result;
+ }
+ 
++QList<DiscoveredDevice> discoverDevices(const QStringList& candidates) {
++    QList<DiscoveredDevice> found;
++    QSet<QString> seen;
++    for (const auto& candidate : candidates) {
++        if (databasePath(candidate).isEmpty()) continue;
++        auto snapshot = inspectDevice(candidate);
++        if (snapshot.root.isEmpty() || seen.contains(snapshot.root)) continue;
++        seen.insert(snapshot.root);
++        const QFileInfo device(candidate);
++        const auto label = device.fileName().isEmpty() ? candidate : device.fileName();
++        found.append({label, std::move(snapshot)});
++    }
++    return found;
++}
++
+ bool DeviceSnapshot::matches(const DeviceSnapshot& other) const {
+     return state == DeviceState::Readable && other.state == DeviceState::Readable &&
+             root == other.root && mountIdentity == other.mountIdentity && fingerprint == other.fingerprint;
+diff --git a/src/library/rekordbox/rekordboxdevice.h b/src/library/rekordbox/rekordboxdevice.h
+--- a/src/library/rekordbox/rekordboxdevice.h
++++ b/src/library/rekordbox/rekordboxdevice.h
+@@ -2,7 +2,9 @@
+ 
+ #include <QByteArray>
+ #include <QList>
++#include <QList>
+ #include <QString>
++#include <QStringList>
+ 
+ namespace mixxx::rekordbox {
+ 
+@@ -40,6 +42,7 @@
+ 
+ QString databasePath(const QString& root);
+ DeviceSnapshot inspectDevice(const QString& root);
++QList<DiscoveredDevice> discoverDevices(const QStringList& candidates);
+ 
+ // PDB paths beginning with '/' are relative to the volume, not the host.
+ // Missing files may be represented, but traversal and symlink escapes may not.
+diff --git a/src/library/rekordbox/rekordboxdiscovery.h b/src/library/rekordbox/rekordboxdiscovery.h
+new file mode 100644
+--- /dev/null
++++ b/src/library/rekordbox/rekordboxdiscovery.h
+@@ -0,0 +1,46 @@
++#pragma once
++
++#include <QByteArray>
++#include <QDir>
++#include <QFileInfo>
++#include <QHash>
++#include <QSet>
++#include <QStringList>
++
++namespace mixxx::rekordbox {
++// Only inspect explicit mount roots and immediate legacy mount children.
++// Never recursively search the system disk for exported libraries.
++inline QStringList discoveryPaths(const QStringList& mountedRoots,
++        const QStringList& legacyDirectories) {
++    QStringList candidates = mountedRoots;
++    for (const auto& directory : legacyDirectories) {
++        if (directory.isEmpty()) continue;
++        const auto children = QDir(directory).entryInfoList(QDir::AllDirs | QDir::NoDotAndDotDot);
++        for (const auto& child : children) candidates.append(child.absoluteFilePath());
++    }
++    QStringList result;
++    QSet<QString> seen;
++    for (const auto& candidate : candidates) {
++        const QFileInfo file(candidate);
++        if (candidate.isEmpty() || !file.isDir()) continue;
++        const auto canonical = file.canonicalFilePath();
++        if (canonical.isEmpty() || canonical == QStringLiteral("/") || seen.contains(canonical)) continue;
++        seen.insert(canonical);
++        result.append(canonical);
++    }
++    return result;
++}
++
++inline QStringList changedMountRoots(const QStringList& previousRoots,
++        const QStringList& currentRoots,
++        const QHash<QString, QByteArray>& previousIdentities,
++        const QHash<QString, QByteArray>& currentIdentities) {
++    QStringList changed;
++    for (const auto& root : previousRoots) {
++        if (!currentRoots.contains(root) || previousIdentities.value(root) != currentIdentities.value(root)) {
++            changed.append(root);
++        }
++    }
++    return changed;
++}
++} // namespace mixxx::rekordbox
+diff --git a/src/library/rekordbox/rekordboxfeature.cpp b/src/library/rekordbox/rekordboxfeature.cpp
+--- a/src/library/rekordbox/rekordboxfeature.cpp
++++ b/src/library/rekordbox/rekordboxfeature.cpp
+@@ -1,5 +1,6 @@
+ #include "library/rekordbox/rekordboxperformancewriter.h"
+ #include "library/rekordbox/rekordboxfeature.h"
++#include "library/rekordbox/rekordboxdiscovery.h"
+ 
+ #include <algorithm>
+ #include <utility>
+@@ -25,6 +26,7 @@
+ #include "track/track.h"
+ #include "moc_rekordboxfeature.cpp"
+ #include "util/sandbox.h"
++#include "util/rx3usbstorage.h"
+ #include "widget/wlibrary.h"
+ 
+ namespace {
+@@ -63,11 +65,15 @@
+ #if defined(__WINDOWS__)
+     devices = QDir::drives();
+ #elif defined(__LINUX__)
+-    for (const auto& base : QStringList{QStringLiteral("/media"),
++    QStringList mountedRoots;
++    for (const auto& volume : QStorageInfo::mountedVolumes()) {
++        if (volume.isValid() && volume.isReady()) mountedRoots.append(volume.rootPath());
++    }
++    const auto candidates = mixxx::rekordbox::discoveryPaths(mountedRoots,
++            {QStringLiteral("/media"),
+                  QStringLiteral("/media/") + QString::fromLocal8Bit(qgetenv("USER")),
+-                 QStringLiteral("/run/media/") + QString::fromLocal8Bit(qgetenv("USER"))}) {
+-        devices += QDir(base).entryInfoList(QDir::AllDirs | QDir::NoDotAndDotDot);
+-    }
++                 QStringLiteral("/run/media/") + QString::fromLocal8Bit(qgetenv("USER"))});
++    for (const auto& candidate : candidates) devices.append(QFileInfo(candidate));
+ #elif !defined(Q_OS_MACOS)
+     devices = QDir(QStringLiteral("/Volumes")).entryInfoList(
+             QDir::AllDirs | QDir::NoDotAndDotDot);
+@@ -76,25 +82,16 @@
+         devices.append(QFileInfo(path));
+     }
+ 
+-    QList<mixxx::rekordbox::DiscoveredDevice> found;
+-    QSet<QString> seen;
++    QStringList paths;
+     for (const auto& device : std::as_const(devices)) {
+-        if (findRekordboxPdbPath(device.absoluteFilePath()).isEmpty()) {
+-            continue;
+-        }
+-        auto snapshot = mixxx::rekordbox::inspectDevice(device.absoluteFilePath());
+-        if (snapshot.root.isEmpty() || seen.contains(snapshot.root)) {
+-            continue;
+-        }
+-        seen.insert(snapshot.root);
+-        if (snapshot.state != mixxx::rekordbox::DeviceState::Readable) {
+-            qWarning() << "Cannot read Rekordbox source" << device.absoluteFilePath()
+-                       << snapshot.error;
+-        }
+-        const auto label = device.fileName().isEmpty()
+-                ? device.absoluteFilePath()
+-                : device.fileName();
+-        found.append({label, std::move(snapshot)});
++        paths.append(device.absoluteFilePath());
++    }
++    auto found = mixxx::rekordbox::discoverDevices(paths);
++    for (const auto& device : found) {
++        if (device.snapshot.state != mixxx::rekordbox::DeviceState::Readable) {
++            qWarning() << "Cannot read Rekordbox source" << device.snapshot.root
++                       << device.snapshot.error;
++        }
+     }
+     return found;
+ }
+@@ -208,6 +205,7 @@
+ 
+ void RekordboxFeature::checkMountedVolumes() {
+     QStringList roots;
++    QHash<QString, QByteArray> identities;
+     for (const auto& volume : QStorageInfo::mountedVolumes()) {
+         if (!volume.isValid() || !volume.isReady()) {
+             continue;
+@@ -218,25 +216,29 @@
+         }
+ #endif
+         roots.append(QDir::cleanPath(volume.rootPath()));
++#ifdef Q_OS_LINUX
++        identities.insert(QDir::cleanPath(volume.rootPath()), rx3::UsbStorageInfo(volume.rootPath()).device());
++#endif
+     }
+     roots.removeDuplicates();
+     roots.sort();
+     const bool firstScan = !std::exchange(m_initialMountScanDone, true);
+-    if (roots != m_mountedRoots) {
++    if (roots != m_mountedRoots || identities != m_mountedIdentities) {
+         const auto previous = m_mountedRoots;
++        const auto changed = mixxx::rekordbox::changedMountRoots(
++                previous, roots, m_mountedIdentities, identities);
+         m_mountedRoots = roots;
+-        for (const auto& removed : previous) {
+-            if (!roots.contains(removed)) {
+-                m_askedVolumes.remove(removed);
+-                ++m_generations[removed];
+-                m_rekordboxSecurityTokens.remove(removed);
+-                // Revoke immediately on unmount, before asynchronous discovery.
+-                // Both decks observe the shared atomic token in their callback.
+-                const auto session=m_sessions.value(removed);
+-                if(session) session->invalidate();
+-                if (m_loadingRoot == removed && m_loadingSession) {
+-                    m_loadingSession->invalidate();
+-                }
++        m_mountedIdentities = identities;
++        for (const auto& removed : changed) {
++            m_askedVolumes.remove(removed);
++            ++m_generations[removed];
++            m_rekordboxSecurityTokens.remove(removed);
++            // Revoke on unmount OR replacement before asynchronous discovery.
++            // Both decks observe the shared atomic token in their callback.
++            const auto session=m_sessions.value(removed);
++            if(session) session->invalidate();
++            if (m_loadingRoot == removed && m_loadingSession) {
++                m_loadingSession->invalidate();
+             }
+         }
+         startDiscovery();
+diff --git a/src/library/rekordbox/rekordboxfeature.h b/src/library/rekordbox/rekordboxfeature.h
+--- a/src/library/rekordbox/rekordboxfeature.h
++++ b/src/library/rekordbox/rekordboxfeature.h
+@@ -86,6 +86,7 @@
+     QHash<QString, int> m_loadAttempts;
+     QSet<QString> m_askedVolumes;
+     QStringList m_mountedRoots;
++    QHash<QString, QByteArray> m_mountedIdentities;
+     QTimer m_mountTimer;
+     std::shared_ptr<mixxx::rekordbox::RekordboxUsbSession> m_loadingSession;
+     QString m_loadingRoot;
+diff --git a/src/test/rekordboxdiscovery_test.cpp b/src/test/rekordboxdiscovery_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/test/rekordboxdiscovery_test.cpp
+@@ -0,0 +1,161 @@
++#include <gtest/gtest.h>
++
++#include <QDir>
++#include <QFile>
++#include <QTemporaryDir>
++
++#include "library/rekordbox/rekordboxdevice.h"
++#include "library/rekordbox/rekordboxdiscovery.h"
++#include "util/linuxmountidentity.h"
++#include "util/rx3usbstorage.h"
++
++namespace {
++using namespace mixxx::rekordbox;
++
++void marker(const QString& root) {
++    ASSERT_TRUE(QDir().mkpath(root + "/PIONEER/rekordbox"));
++    QFile file(root + "/PIONEER/rekordbox/export.pdb");
++    ASSERT_TRUE(file.open(QIODevice::WriteOnly));
++    ASSERT_EQ(7, file.write("fixture"));
++}
++} // namespace
++
++TEST(RekordboxDiscoveryTest, CustomMountedRootIsDiscoveredWithoutLegacyDirectory) {
++    QTemporaryDir base;
++    ASSERT_TRUE(base.isValid());
++    const auto fixedMount = base.filePath("mnt/DJ USB");
++    marker(fixedMount);
++    const auto paths = discoveryPaths({fixedMount}, {base.filePath("absent-media")});
++    const auto found = discoverDevices(paths);
++    ASSERT_EQ(1, found.size());
++    EXPECT_EQ(QFileInfo(fixedMount).canonicalFilePath(), found.front().snapshot.root);
++    EXPECT_EQ(DeviceState::Readable, found.front().snapshot.state);
++    EXPECT_EQ(QStringLiteral("DJ USB"), found.front().label);
++}
++
++TEST(RekordboxDiscoveryTest, LegacyChildrenAreRetainedAndAliasesDeduplicated) {
++    QTemporaryDir base;
++    ASSERT_TRUE(base.isValid());
++    const auto volume = base.filePath("media/USB");
++    marker(volume);
++#ifndef Q_OS_WIN
++    ASSERT_TRUE(QFile::link(volume, base.filePath("alias")));
++    const auto mounts = QStringList{volume, base.filePath("alias"), volume};
++#else
++    const auto mounts = QStringList{volume, volume};
++#endif
++    const auto paths = discoveryPaths(mounts, {base.filePath("media")});
++    EXPECT_EQ(1, paths.size());
++    EXPECT_EQ(1, discoverDevices(paths).size());
++}
++
++TEST(RekordboxDiscoveryTest, RootDiskAndRecursiveLocalFoldersAreNotSearched) {
++    QTemporaryDir base;
++    ASSERT_TRUE(base.isValid());
++    marker(base.filePath("media/parent/nested"));
++    const auto paths = discoveryPaths({"/", "", base.filePath("missing")},
++            {base.filePath("media"), ""});
++    EXPECT_FALSE(paths.contains("/"));
++    EXPECT_FALSE(paths.contains(base.filePath("media/parent/nested")));
++    EXPECT_TRUE(discoverDevices(paths).isEmpty());
++}
++
++TEST(RekordboxDiscoveryTest, ExportSymlinkOutsideTheMountIsRejected) {
++#ifdef Q_OS_WIN
++    GTEST_SKIP() << "Windows symlink creation requires additional privileges";
++#else
++    QTemporaryDir volume;
++    QTemporaryDir outside;
++    ASSERT_TRUE(volume.isValid());
++    ASSERT_TRUE(outside.isValid());
++    marker(outside.path());
++    ASSERT_TRUE(QFile::link(outside.path() + "/PIONEER", volume.filePath("PIONEER")));
++    EXPECT_TRUE(discoverDevices({volume.path()}).isEmpty());
++#endif
++}
++
++TEST(RekordboxDiscoveryTest, ReplacementAtTheSamePathAndRemovalRevokeOldRoots) {
++    const QString first = "/mnt/usb1";
++    const QString second = "/mnt/usb2";
++    const QString third = "/mnt/usb3";
++    const QHash<QString, QByteArray> previous{{first, "device:mount:1:disk:10"},
++            {second, "device:mount:2:disk:20"}, {third, "device:mount:3:disk:30"}};
++    const QHash<QString, QByteArray> current{{first, "device:mount:1:disk:11"},
++            {second, "device:mount:2:disk:20"}};
++    EXPECT_EQ(QStringList({first, third}), changedMountRoots({first, second, third},
++            {first, second}, previous, current));
++    EXPECT_TRUE(changedMountRoots({first}, {first}, previous, previous).isEmpty());
++    EXPECT_EQ(QStringList({first}), changedMountRoots({first}, {first}, previous, {}));
++}
++
++TEST(RekordboxDiscoveryTest, MatchingExportOnAReplacementMountIsNotTheSameDevice) {
++    QTemporaryDir volume;
++    ASSERT_TRUE(volume.isValid());
++    marker(volume.path());
++    const auto original = inspectDevice(volume.path());
++    ASSERT_EQ(DeviceState::Readable, original.state);
++    auto replacement = original;
++    replacement.mountIdentity.append(":replacement-generation");
++    EXPECT_FALSE(original.matches(replacement));
++    EXPECT_TRUE(original.matches(inspectDevice(volume.path())));
++}
++
++#ifdef Q_OS_LINUX
++TEST(RekordboxLinuxMountTest, FdInfoParsingIsStrictAndIgnoresUnrelatedFields) {
++    EXPECT_EQ(QByteArray("42"), rx3::mountIdFromFdInfo("pos:\t0\nflags:\t010000000\nmnt_id:\t42\nino:\t1\n"));
++    for (const auto& invalid : {QByteArray(), QByteArray("mnt_id:\t0\n"),
++                 QByteArray("mnt_id:\t-1\n"), QByteArray("mnt_id:\t42garbage\n"),
++                 QByteArray("mnt_id:\t18446744073709551616\n")}) {
++        EXPECT_TRUE(rx3::mountIdFromFdInfo(invalid).isEmpty());
++    }
++}
++
++TEST(RekordboxLinuxMountTest, ExistingMountIdentityIsStableAndFailuresAreClosed) {
++    QTemporaryDir volume;
++    ASSERT_TRUE(volume.isValid());
++    const auto canonical = QFileInfo(volume.path()).canonicalFilePath();
++    const auto device = QStorageInfo(canonical).device();
++    const auto first = rx3::linuxMountIdentity(canonical, device);
++    ASSERT_FALSE(first.isEmpty());
++    EXPECT_EQ(first, rx3::linuxMountIdentity(canonical, device));
++    EXPECT_TRUE(first.contains(":mount:") || first.contains(":unique-mount:"));
++    EXPECT_TRUE(rx3::linuxMountIdentity(volume.filePath("missing"), device).isEmpty());
++    EXPECT_TRUE(rx3::linuxMountIdentity(canonical, {}).isEmpty());
++}
++
++TEST(RekordboxLinuxMountTest, IdentityChecksDoNotLeakFileDescriptors) {
++    QTemporaryDir volume;
++    ASSERT_TRUE(volume.isValid());
++    const auto canonical = QFileInfo(volume.path()).canonicalFilePath();
++    // Exercise the fdinfo path even when the host uses unique mount IDs.
++    const QByteArray device("virtual-test-volume");
++    const QByteArray sequence;
++    const auto legacy = rx3::legacyLinuxMountIdentity(canonical, device, sequence);
++    ASSERT_FALSE(legacy.isEmpty());
++    EXPECT_TRUE(legacy.contains(":mount:"));
++    EXPECT_TRUE(rx3::legacyLinuxMountIdentity(volume.filePath("missing"), device, sequence).isEmpty());
++    EXPECT_TRUE(rx3::legacyLinuxMountIdentity(canonical, "/dev/nauticmixxx-missing-fixture", {}).isEmpty());
++    const auto before = QDir("/proc/self/fd").entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size();
++    for (int iteration = 0; iteration < 100; ++iteration) {
++        ASSERT_FALSE(rx3::linuxMountIdentity(canonical, device).isEmpty());
++        EXPECT_EQ(legacy, rx3::legacyLinuxMountIdentity(canonical, device, sequence));
++    }
++    EXPECT_EQ(before, QDir("/proc/self/fd").entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size());
++}
++
++TEST(RekordboxLinuxMountTest, PartitionGenerationComesFromTheParentDisk) {
++    QTemporaryDir sysfs;
++    ASSERT_TRUE(sysfs.isValid());
++    ASSERT_TRUE(QDir().mkpath(sysfs.filePath("disk/partition")));
++    QFile generation(sysfs.filePath("disk/diskseq"));
++    ASSERT_TRUE(generation.open(QIODevice::WriteOnly));
++    ASSERT_EQ(4, generation.write("123\n"));
++    generation.close();
++    EXPECT_EQ(QByteArray("123"), rx3::diskSequenceFromSysfs(sysfs.filePath("disk/partition")));
++    EXPECT_EQ(QByteArray("123"), rx3::diskSequenceFromSysfs(sysfs.filePath("disk")));
++    ASSERT_TRUE(generation.open(QIODevice::WriteOnly | QIODevice::Truncate));
++    generation.write("not-a-generation\n");
++    generation.close();
++    EXPECT_TRUE(rx3::diskSequenceFromSysfs(sysfs.filePath("disk/partition")).isEmpty());
++}
++#endif
+diff --git a/src/util/linuxmountidentity.h b/src/util/linuxmountidentity.h
+new file mode 100644
+--- /dev/null
++++ b/src/util/linuxmountidentity.h
+@@ -0,0 +1,90 @@
++#pragma once
++
++#include <QByteArray>
++#include <QFile>
++#include <QFileInfo>
++#include <QString>
++
++#ifdef Q_OS_LINUX
++#include <fcntl.h>
++#include <sys/stat.h>
++#include <sys/sysmacros.h>
++#include <unistd.h>
++
++namespace rx3 {
++inline QByteArray positiveKernelNumber(const QByteArray& value) {
++    const auto text = value.trimmed();
++    if (text.isEmpty()) return {};
++    for (const char character : text) {
++        if (character < '0' || character > '9') return {};
++    }
++    bool valid = false;
++    const auto number = text.toULongLong(&valid);
++    return valid && number > 0 ? QByteArray::number(number) : QByteArray();
++}
++
++inline QByteArray mountIdFromFdInfo(const QByteArray& info) {
++    for (const auto& line : info.split('\n')) {
++        if (line.startsWith("mnt_id:")) return positiveKernelNumber(line.mid(7));
++    }
++    return {};
++}
++
++inline QByteArray diskSequenceFromSysfs(QString directory) {
++    // A partition keeps diskseq on its parent disk, not on the partition.
++    for (int level = 0; level < 2 && !directory.isEmpty(); ++level) {
++        QFile file(directory + QStringLiteral("/diskseq"));
++        if (file.open(QIODevice::ReadOnly)) return positiveKernelNumber(file.readAll());
++        directory = QFileInfo(directory).absolutePath();
++    }
++    return {};
++}
++
++inline QByteArray diskSequence(const QByteArray& device) {
++    struct stat status{};
++    if (::stat(device.constData(), &status) != 0 || !S_ISBLK(status.st_mode)) return {};
++    const QString link = QStringLiteral("/sys/dev/block/%1:%2")
++            .arg(major(status.st_rdev)).arg(minor(status.st_rdev));
++    return diskSequenceFromSysfs(QFileInfo(link).canonicalFilePath());
++}
++
++inline QByteArray legacyLinuxMountIdentity(const QString& path, const QByteArray& device,
++        const QByteArray& sequence) {
++    if (path.isEmpty() || device.isEmpty()) return {};
++    const auto encoded = QFile::encodeName(path);
++    // Older kernels: combine the mount ID with the kernel's disk sequence.
++    // This distinguishes a new USB disk assigned the old /dev/sdX name.
++    // The descriptor is short lived, so a normal unmount remains possible.
++    const int descriptor = ::open(encoded.constData(), O_PATH | O_CLOEXEC);
++    if (descriptor < 0) return {};
++    QFile info(QStringLiteral("/proc/self/fdinfo/%1").arg(descriptor));
++    const auto mount = info.open(QIODevice::ReadOnly)
++            ? mountIdFromFdInfo(info.readAll()) : QByteArray();
++    ::close(descriptor);
++    if (mount.isEmpty()) return {};
++    struct stat block{};
++    // A removable block device must have a generation identifier. Refuse
++    // weak identities when diskseq cannot be read on an older kernel.
++    const bool blockPresent = ::stat(device.constData(), &block) == 0 && S_ISBLK(block.st_mode);
++    if ((device.startsWith("/dev/") && !blockPresent) || (blockPresent && sequence.isEmpty())) return {};
++    return device + ":mount:" + mount + ":disk:" + sequence;
++}
++
++inline QByteArray linuxMountIdentity(const QString& path, const QByteArray& device) {
++    if (path.isEmpty() || device.isEmpty()) return {};
++    const auto encoded = QFile::encodeName(path);
++    const auto sequence = diskSequence(device);
++    // Linux 6.8+ returns an ID never reused during the lifetime of the kernel.
++    // Use the ABI value so Debian 12's older headers can still compile this.
++    constexpr unsigned int mountIdMask = 0x1000;
++    constexpr unsigned int uniqueMountIdMask = 0x4000;
++    struct statx status{};
++    if (::statx(AT_FDCWD, encoded.constData(), AT_NO_AUTOMOUNT,
++                mountIdMask | uniqueMountIdMask, &status) == 0 &&
++            (status.stx_mask & uniqueMountIdMask) != 0 && status.stx_mnt_id > 0) {
++        return device + ":unique-mount:" + QByteArray::number(status.stx_mnt_id) + ":disk:" + sequence;
++    }
++    return legacyLinuxMountIdentity(path, device, sequence);
++}
++} // namespace rx3
++#endif
+diff --git a/src/util/rx3usbstorage.h b/src/util/rx3usbstorage.h
+--- a/src/util/rx3usbstorage.h
++++ b/src/util/rx3usbstorage.h
+@@ -8,6 +8,7 @@
+ #include <algorithm>
+ #include <limits>
+ #include <utility>
++#include "util/linuxmountidentity.h"
+ 
+ #ifdef Q_OS_MAC
+ #include <sys/mount.h>
+@@ -41,6 +42,10 @@
+         m_ready=storage.isReady();m_readOnly=storage.isReadOnly();
+         m_available=std::max<qint64>(0,storage.bytesAvailable());
+         m_device=storage.device();m_root=storage.rootPath();
++#ifdef Q_OS_LINUX
++        m_device=linuxMountIdentity(canonical,m_device);
++        if(m_device.isEmpty()) m_ready=false;
++#endif
+ #endif
+     }
+     bool isReady() const {return m_ready;}
+diff --git a/src/widget/wrx3trackinfo.h b/src/widget/wrx3trackinfo.h
+--- a/src/widget/wrx3trackinfo.h
++++ b/src/widget/wrx3trackinfo.h
+@@ -135,7 +135,13 @@
+         static const QStringList prefixes={"♫  ","♙  ","▣  ","◷  ","BPM  ","♯  ","","○  ","▣  ","▦  "};
+         for(int row=0;row<10;++row) {
+             auto* item=m_fields->item(row);item->setSizeHint(QSize(1,qMax(26,m_fields->height()/10)));
+-            item->setText(row==6?QString(m_pending,QChar(0x2605))+QString(5-m_pending,QChar(0x2606)):prefixes[row]+m_data.values.value(row));
++            QString text;
++            if (row == 6) {
++                text = QString(m_pending, QChar(0x2605)) + QString(5 - m_pending, QChar(0x2606));
++            } else {
++                text = prefixes[row] + m_data.values.value(row);
++            }
++            item->setText(text);
+             item->setToolTip(m_data.values.value(row));
+         }
+         m_trackNumber->setText(m_data.location.isEmpty()?"No track selected":m_data.number>0?
+diff --git a/src/widget/wwaveformviewer.cpp b/src/widget/wwaveformviewer.cpp
+--- a/src/widget/wwaveformviewer.cpp
++++ b/src/widget/wwaveformviewer.cpp
+@@ -1,4 +1,6 @@
+ #include "widget/wwaveformviewer.h"
++
++#include "control/controlobject.h"
+ 
+ #include <QDragEnterEvent>
+ #include <QEvent>
+diff --git a/src/test/rx3beatfx_test.cpp b/src/test/rx3beatfx_test.cpp
+--- a/src/test/rx3beatfx_test.cpp
++++ b/src/test/rx3beatfx_test.cpp
+@@ -370,7 +370,7 @@
+     ControlObject bpm(ConfigKey("[RX3Display]", "master_bpm"), false, false, false, 120);
+     WRx3BeatFx panel(config(), effects.get(), &parent);
+     parent.resize(1280, 100); panel.resize(1240, 60); parent.show(); panel.show();
+-    auto* pad = panel.findChild<WRx3XPad*>("RX3XPadSlider");
++    auto* pad = dynamic_cast<WRx3XPad*>(panel.findChild<QSlider*>("RX3XPadSlider"));
+     ASSERT_TRUE(pad);
+     const auto renderDirectory = qEnvironmentVariable("RX3_XPAD_RENDER_DIR");
+     auto capture = [pad, renderDirectory](const QString& name) {
+@@ -425,7 +425,7 @@
+     auto* beat = new WLabel(&parent); beat->setObjectName("RX3BeatFxBeat");
+     WRx3BeatFx panel(config(), effects.get(), &parent);
+     parent.resize(1280, 100); panel.resize(1240, 60); parent.show(); panel.show();
+-    auto* pad = panel.findChild<WRx3XPad*>("RX3XPadSlider");
++    auto* pad = dynamic_cast<WRx3XPad*>(panel.findChild<QSlider*>("RX3XPadSlider"));
+     load("org.mixxx.effects.pitchshift");
+     QCoreApplication::processEvents();
+     EXPECT_EQ(WRx3XPad::Layout::Pitch, pad->presentation());
+@@ -560,7 +560,7 @@
+     choose(panel, 1, "org.mixxx.effects.reverb");
+     bank(panel, 0)->click();
+     const auto echoId = panel.bankId(0);
+-    auto* pad = panel.findChild<WRx3XPad*>("RX3XPadSlider");
++    auto* pad = dynamic_cast<WRx3XPad*>(panel.findChild<QSlider*>("RX3XPadSlider"));
+     ASSERT_TRUE(pad);
+     const QPoint halfBeat(pad->width() * 7 / 16, 20);
+     QTest::mousePress(pad, Qt::LeftButton, Qt::NoModifier, halfBeat);
+@@ -650,7 +650,7 @@
+     ControlObject::set(ConfigKey("[RX3BeatFx]","xpad_hold"),0);EXPECT_EQ(0,enabled());
+     ControlObject::set(ConfigKey("[RX3BeatFx]","bank_clear"),2);EXPECT_TRUE(panel.bankId(1).isEmpty());
+     panel.selectEffect(effects->getBackendManager()->getManifestFromUniqueId("org.mixxx.effects.tremolo"),false);
+-    auto* pad=panel.findChild<WRx3XPad*>("RX3XPadSlider");
++    auto* pad=dynamic_cast<WRx3XPad*>(panel.findChild<QSlider*>("RX3XPadSlider"));
+     EXPECT_TRUE(pad->cells()[0].enabled);EXPECT_TRUE(pad->cells()[4].enabled);
+     panel.positionPad(4.5/8);EXPECT_NEAR(4.0/3,rx3FxParameter(slot,"rate")->getValue(),1e-9);
+     panel.selectEffect(effects->getBackendManager()->getManifestFromUniqueId("org.mixxx.effects.phaser"),false);
+diff --git a/src/test/rx3display_test.cpp b/src/test/rx3display_test.cpp
+--- a/src/test/rx3display_test.cpp
++++ b/src/test/rx3display_test.cpp
+@@ -1240,7 +1240,7 @@
+         Rx3BrowserTestAccess::moveTools(browser,6);
+         auto* menu=browser.findChild<QPushButton*>("RX3BrowserToolsButton");ASSERT_TRUE(menu);
+         EXPECT_TRUE(menu->property("encoderFocus").toBool());Rx3BrowserTestAccess::enterTools(browser);
+-        auto* utility=browser.findChild<WRx3Utility*>("RX3Utility");ASSERT_TRUE(utility);EXPECT_TRUE(utility->isVisible());
++        auto* utility=dynamic_cast<WRx3Utility*>(browser.findChild<QWidget*>("RX3Utility"));ASSERT_TRUE(utility);EXPECT_TRUE(utility->isVisible());
+         Rx3BrowserTestAccess::moveTools(browser,100);Rx3BrowserTestAccess::enterTools(browser);
+         EXPECT_FALSE(utility->isVisible());EXPECT_EQ("SOURCE",browser.findChild<QPushButton*>("RX3BrowserBreadcrumb")->text());
+     }
+@@ -2507,7 +2507,7 @@
+         auto* breadcrumb=browser.findChild<QPushButton*>("RX3BrowserBreadcrumb");ASSERT_TRUE(breadcrumb);
+         EXPECT_EQ("SOURCE",breadcrumb->text());
+         button->click();EXPECT_EQ("UTILITY",breadcrumb->text());
+-        auto* utility=browser.findChild<WRx3Utility*>("RX3Utility");ASSERT_TRUE(utility);EXPECT_TRUE(utility->isVisible());
++        auto* utility=dynamic_cast<WRx3Utility*>(browser.findChild<QWidget*>("RX3Utility"));ASSERT_TRUE(utility);EXPECT_TRUE(utility->isVisible());
+         EXPECT_TRUE(button->property("active").toBool());
+         EXPECT_FALSE(browser.findChild<QPushButton*>("RX3SourceButton")->property("active").toBool());
+         Rx3BrowserTestAccess::backTools(browser);
+diff --git a/src/test/rx3display_test.cpp b/src/test/rx3display_test.cpp
+--- a/src/test/rx3display_test.cpp
++++ b/src/test/rx3display_test.cpp
+@@ -855,8 +855,10 @@
+                 }
+             }
+             ASSERT_GE(wordBottom,0);
+-            EXPECT_GE(numberTop-wordBottom,1);
+-            EXPECT_LE(numberTop-wordBottom,8*dpr);
++            // Count empty rows between glyphs, excluding both occupied endpoints.
++            const int blankRows = numberTop - wordBottom - 1;
++            EXPECT_GE(blankRows, 0);
++            EXPECT_LE(blankRows, 8 * dpr);
+             if(!output.isEmpty()) ASSERT_TRUE(image.save(output+QString("/deck-%1-stage-%2-%3x.png").arg(deck).arg(stage).arg(dpr)));
+         }
+     }

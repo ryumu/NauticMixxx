@@ -1,4 +1,7 @@
-# Linux and Raspberry Pi 4 — NauticMixxx 1.5
+# Linux and Raspberry Pi 4 / 5 — NauticMixxx
+
+For Pi 5 development setup, SSH access and a 10-inch touchscreen checklist,
+see the [Japanese Pi 5 guide](RASPBERRY-PI-5-DEV-JA.md).
 
 ## Is it possible, and is it free?
 
@@ -8,7 +11,7 @@ packages. No paid compiler, Windows/macOS license, subscription, or cross compil
 is required. This free software/build route assumes you already have the
 computer/Pi, storage, power and Internet access.
 
-**Raspberry Pi 4 is an experimental target.** A successful ARM64 server build
+**Raspberry Pi 4 and 5 are experimental targets.** A successful ARM64 server build
 does not prove that a Pi 4 can render the RX3 display and play two decks without
 audio dropouts. GPU drivers, display resolution, cooling, available RAM, USB audio
 and the particular controller must be tested on the actual Pi.
@@ -80,7 +83,7 @@ disables local track analysis and scanning by design.
 Start the resulting application **inside your desktop session**:
 
 ```sh
-./build/test-candidate/1.5.0-linux-$(uname -m)/stage/bin/nauticmixxx
+"./build/test-candidate/$(cat VERSION)-linux-$(uname -m)/stage/bin/nauticmixxx"
 ```
 
 It uses the NauticMixxx icon, English by default and an isolated profile at
@@ -91,7 +94,7 @@ You can use `NAUTICMIXXX_PROFILE=/another/path` for an isolated hardware test.
 Optional desktop menu entry (keep the staged folder in its final location first):
 
 ```sh
-./build/test-candidate/1.5.0-linux-$(uname -m)/stage/bin/nauticmixxx --install-desktop
+"./build/test-candidate/$(cat VERSION)-linux-$(uname -m)/stage/bin/nauticmixxx" --install-desktop
 ```
 
 The stage can be moved as a whole. It depends on the host distribution's shared
@@ -172,9 +175,12 @@ for Trixie. The same no-artifact default and optional one-day retention apply.
    As a starting point, try 44.1/48 kHz and a 512/1024-frame buffer, then adjust
    against measured dropouts and jog latency. These are test settings, not an
    established Pi performance preset. Key lock and effects add CPU load.
-4. Connect a Rekordbox-exported USB. Linux discovery checks `/media`,
-   `/media/$USER` and `/run/media/$USER`; use manual source authorization for an
-   unusual mount location. Ensure the current user can read the mount. Newer
+4. Connect a Rekordbox-exported USB. Linux discovery checks actual mounted
+   filesystem roots (including fixed mounts such as `/mnt/djusb`) as well as
+   `/media`, `/media/$USER` and `/run/media/$USER`. It inspects only each candidate's
+   exported catalog and does not recursively scan local music directories.
+   Ensure the current user can read the mount. Manual folder authorization is
+   currently macOS-only. Newer
    Rekordbox Device Library Plus compatibility is not implied; use the supported
    exported catalog format.
 5. Test the controller's MIDI/HID ports, browser exit, load protection, jog rim and
@@ -189,6 +195,12 @@ reconnect the device. Do not run the DJ app as root to bypass permissions.
 Linux uses its own audio decoders. The v1.4 CoreAudio-specific MP3 correction and
 macOS timing measurements cannot certify Linux timing. Check WAV and MP3 cues,
 beatgrids and loops on the target system before using it in a performance.
+
+Linux USB identity includes the mount generation rather than only `/dev/sdX`.
+Newer kernels provide a unique mount ID; older kernels use the mount ID plus
+the block disk's `diskseq` from sysfs. On older kernels, block devices whose
+disk generation cannot be read are treated as unavailable. Normal unmounting
+is not held open by this check. Real Pi hot-swap and safe-eject validation is pending.
 
 ## Report a failure
 

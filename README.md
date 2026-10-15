@@ -77,6 +77,8 @@ The release includes corresponding source, a package manifest, signed update fee
 
 [Build instructions](docs/BUILDING.md) · [Linux / Raspberry Pi experiments](docs/LINUX-RASPBERRY-PI.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [Report an issue](https://github.com/nauticsoftware/NauticMixxx/issues)
 
+[Raspberry Pi 5 開発環境（日本語）](docs/RASPBERRY-PI-5-DEV-JA.md)
+
 ---
 
 <sub>NauticMixxx is a community edition built on Mixxx 2.5.6. NauticMixxx components use GPL v3; the Mixxx engine retains GPL v2-or-later terms. [License](LICENSE.md) · [Third-party notices](THIRD_PARTY_NOTICES.md) · [Trademarks](TRADEMARKS.md). Independent from the hardware and software trademark owners named in those notices.</sub>

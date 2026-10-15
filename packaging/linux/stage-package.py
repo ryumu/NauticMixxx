@@ -45,7 +45,7 @@ def stage(prefix: Path, source: Path, project: Path) -> None:
     metadata = dict(product='NauticMixxx', version=(project / 'VERSION').read_text().strip(),
                     architecture=platform.machine(), distribution=(platform.freedesktop_os_release()
                         if platform.system() == 'Linux' else {'ID': 'non-linux-test-fixture'}),
-                    source='Mixxx 2.5.6 with 17 NauticMixxx patches', optimization='portable',
+                    source=f'Mixxx 2.5.6 with {len(list((project / "patches").glob("00[0-9][0-9]-*.patch")))} NauticMixxx patches', optimization='portable',
                     icon_sha256=hashlib.sha256(original.read_bytes()).hexdigest(),
                     limitations=['Native distro libraries required; not a universal Linux package',
                                  'Pi 4 GPU, USB audio, controllers and real-time performance untested',

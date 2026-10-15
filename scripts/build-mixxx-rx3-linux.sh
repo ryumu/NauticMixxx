@@ -6,6 +6,7 @@ version=$(cat "$project/VERSION")
 work=${RX3_BUILD_ROOT:-"$project/build/test-candidate/$version-linux-$(uname -m)"}
 jobs=${RX3_BUILD_JOBS:-1}
 tests=${RX3_BUILD_TESTING:-ON}
+build_type=${RX3_BUILD_TYPE:-Release}
 case "$(uname -s)/$(uname -m)" in
   Linux/aarch64|Linux/x86_64) ;;
   *) printf 'Use 64-bit Linux (aarch64 or x86_64). See docs/LINUX-RASPBERRY-PI.md.\n' >&2; exit 1 ;;
@@ -15,6 +16,7 @@ if [ "$(getconf LONG_BIT)" != 64 ]; then
 fi
 case "$jobs" in ''|*[!0-9]*|0) printf 'RX3_BUILD_JOBS must be a positive integer.\n' >&2; exit 1 ;; esac
 case "$tests" in ON|OFF) ;; *) printf 'RX3_BUILD_TESTING must be ON or OFF.\n' >&2; exit 1 ;; esac
+case "$build_type" in Release|RelWithDebInfo|Debug) ;; *) printf 'RX3_BUILD_TYPE must be Release, RelWithDebInfo or Debug.\n' >&2; exit 1 ;; esac
 mkdir -p "$work"
 work=$(CDPATH= cd -- "$work" && pwd)
 archive="$work/mixxx-2.5.6.tar.gz"
@@ -38,7 +40,8 @@ fi
 # Branding must be applied before Qt compiles its resource collection.
 python3 "$project/packaging/linux/prepare-branding.py" "$source_tree" "$project"
 cmake -S "$source_tree" -B "$work/native" -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+  -DCMAKE_BUILD_TYPE="$build_type" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
   -DNAUTICMIX_VERSION="$(cat "$project/VERSION")" \
   -DCMAKE_INSTALL_PREFIX="$work/stage" -DCMAKE_INSTALL_LIBDIR=lib \
   -DQT6=ON -DQML=OFF -DOPTIMIZE=portable -DENGINEPRIME=OFF -DKEYFINDER=OFF \
@@ -47,8 +50,8 @@ cmake -S "$source_tree" -B "$work/native" -G Ninja \
 cmake --build "$work/native" --target mixxx --parallel "$jobs"
 if [ "$tests" = ON ]; then
   cmake --build "$work/native" --target mixxx-test --parallel "$jobs"
-  (cd "$source_tree" && QT_QPA_PLATFORM=offscreen NAUTIC_RX3_STYLESHEET="$project/skins/XDJ_RX3_Mixxx/style.qss" "$work/native/mixxx-test" \
-    --gtest_filter='StartupUpdateCheckerTest.*:StartupUpdateDialogTest.*:StreamCompletionTest.*:LibraryTableViewStateTest.*:Rx3*:RekordboxDecoderTimingTest.*:RekordboxUsbSessionAudioTest.*:RekordboxWaveformImporterTest.*' \
+  (cd "$source_tree" && QT_QPA_PLATFORM=offscreen NAUTIC_SKIN_DIR="$project/skins/XDJ_RX3_Mixxx" NAUTIC_RX3_STYLESHEET="$project/skins/XDJ_RX3_Mixxx/style.qss" "$work/native/mixxx-test" \
+    --gtest_filter='StartupUpdateCheckerTest.*:StartupUpdateDialogTest.*:StreamCompletionTest.*:LibraryTableViewStateTest.*:Rx3*:Rekordbox*:TrackCapabilityPolicyTest.*' \
     --gtest_output="xml:$work/rx3-tests.xml")
 fi
 cmake --install "$work/native"

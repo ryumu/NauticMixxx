@@ -494,3 +494,27 @@ commands in PERFORMANCE's existing topbar outside this native patch.
 - Draw REMAIN's stopwatch as a scalable vector instead of a font glyph.
 - Native checks exercise all operation entry/return paths, unavailable-source
   messages, action callback ownership, row colors/divider and existing FX editing.
+
+## 0045 — Linux USB mount discovery and identity
+
+Also fixes native build compatibility with PCH disabled and Qt 6.12.
+Tests find the Qt base widget by name and use `dynamic_cast` to verify custom
+widget types that do not declare `Q_OBJECT`.
+The deck badge spacing test counts empty rows between glyphs, excluding their
+occupied endpoints, to avoid counting one extra pixel with Linux font substitution.
+
+- Discover exported catalogs at actual Linux mount roots, including fixed
+  mounts under `/mnt`, while retaining the legacy `/media` paths. Do not
+  recursively scan local music directories or follow exports outside a root.
+- Include the kernel mount generation in Linux storage identity. Prefer the
+  unique mount ID available on newer kernels; retain the fdinfo mount-ID path
+  for older kernels and include the parent block disk's sysfs `diskseq`.
+- Detect identity changes at unchanged mount paths and invalidate old sessions
+  before rediscovery. Keep mount descriptors short lived for normal unmounting.
+- Add portable discovery and Linux identity regressions. Linux builds select
+  all `Rekordbox*` tests and `TrackCapabilityPolicyTest.*`; the public-source
+  checks guard this coverage. Pi hardware and physical hot-swap tests remain pending.
+- Materialize track-info labels as `QString` before passing them to the widget.
+  This avoids incompatible conditional-expression types with `QT_USE_QSTRINGBUILDER`.
+- Include `ControlObject` directly in the waveform viewer so the shared zoom
+  handler also compiles when precompiled headers are disabled.

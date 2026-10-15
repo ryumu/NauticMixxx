@@ -42,3 +42,4 @@ jobs:
           python3 scripts/test-windows-installer-contract.py
           python3 scripts/test-windows-skin-package.py
           python3 scripts/test-linux-package.py
+          python3 scripts/test-raspberry-pi-dev.py
