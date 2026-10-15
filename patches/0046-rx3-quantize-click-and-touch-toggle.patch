@@ -1,0 +1,272 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2144,6 +2144,7 @@
+     src/test/rekordboxdevice_test.cpp
+     src/test/rekordboxdiscovery_test.cpp
+     src/test/rx3display_test.cpp
++    src/test/rx3quantize_test.cpp
+     src/test/rx3beatfx_test.cpp
+     src/test/soundreconfiguration_test.cpp
+     src/test/analyserwaveformtest.cpp
+diff --git a/src/skin/legacy/legacyskinparser.cpp b/src/skin/legacy/legacyskinparser.cpp
+--- a/src/skin/legacy/legacyskinparser.cpp
++++ b/src/skin/legacy/legacyskinparser.cpp
+@@ -67,6 +67,7 @@
+ #include "widget/wrx3emergency.h"
+ #include "widget/wrx3countdown.h"
+ #include "widget/wrx3performancewidgets.h"
++#include "widget/wrx3quantizelabel.h"
+ #include "widget/wnumberrate.h"
+ #include "widget/woverview.h"
+ #include "widget/wpixmapstore.h"
+@@ -632,8 +633,9 @@
+                         ? parseLabelWidget<WRx3DeckBadge>(node)
+                         : m_pContext->selectBool(node,"Rx3ModeTitle",false)
+                                 ? parseLabelWidget<WRx3ModeTitle>(node)
+-                                : m_pContext->selectBool(node,"Rx3QuantizeValue",false)
+-                                        ? parseLabelWidget<WRx3QuantizeValue>(node)
++                                : (m_pContext->selectBool(node,"Rx3QuantizeValue",false) ||
++                                          m_pContext->selectBool(node,"Rx3QuantizeToggle",false))
++                                        ? parseLabelWidget<WRx3QuantizeLabel>(node)
+                                         : parseLabelWidget<WLabel>(node));
+     } else if (nodeName == "Knob") {
+         result = wrapWidget(parseStandardWidget<WKnob>(node));
+diff --git a/src/widget/wrx3performancewidgets.h b/src/widget/wrx3performancewidgets.h
+--- a/src/widget/wrx3performancewidgets.h
++++ b/src/widget/wrx3performancewidgets.h
+@@ -47,18 +47,6 @@
+     double m_range=0.06;
+ };
+ 
+-class WRx3QuantizeValue : public WLabel {
+-  public:
+-    using WLabel::WLabel;
+-    void setup(const QDomNode& node,const SkinContext& context) override {
+-        WLabel::setup(node,context);
+-        const auto group=QString("[Channel%1]").arg(context.selectString(node,"Channel"));
+-        auto* value=new ControlProxy(group,"rx3_quantize_beats",this,ControlFlag::NoAssertIfMissing);
+-        auto refresh=[this](double beats){setText(beats>=1?"1":beats>=0.5?"1/2":beats>=0.25?"1/4":"1/8");};
+-        value->connectValueChanged(this,refresh);refresh(value->get());
+-    }
+-};
+-
+ class WRx3ModeTitle : public WLabel {
+   public:
+     using WLabel::WLabel;
+diff --git a/src/widget/wrx3quantizelabel.h b/src/widget/wrx3quantizelabel.h
+new file mode 100644
+--- /dev/null
++++ b/src/widget/wrx3quantizelabel.h
+@@ -0,0 +1,72 @@
++#pragma once
++
++#include <QPushButton>
++#include <QResizeEvent>
++#include <memory>
++
++#include "control/controlproxy.h"
++#include "skin/legacy/skincontext.h"
++#include "widget/wlabel.h"
++
++// Preserve label rendering while a native button handles click/tap activation,
++// release-outside cancellation and accessibility.
++class WRx3QuantizeLabel : public WLabel {
++  public:
++    explicit WRx3QuantizeLabel(QWidget* parent = nullptr)
++            : WLabel(parent), m_button(new QPushButton(this)) {
++        m_button->setObjectName(QStringLiteral("RX3QuantizeToggle"));
++        m_button->setCheckable(true);
++        m_button->setFlat(true);
++        m_button->setFocusPolicy(Qt::NoFocus);
++        m_button->setCursor(Qt::PointingHandCursor);
++        m_button->setStyleSheet(QStringLiteral(
++                "QPushButton { background:transparent; border:0; padding:0; margin:0;"
++                " min-width:0; min-height:0; }"));
++        m_button->setGeometry(rect());
++        connect(m_button, &QPushButton::clicked, this, [this](bool enabled) {
++            if (m_quantize) {
++                m_quantize->set(enabled ? 1 : 0);
++                setHighlight(m_quantize->get() > 0 ? 1 : 0);
++                m_button->setChecked(m_quantize->get() > 0);
++            }
++        });
++    }
++
++    void setup(const QDomNode& node, const SkinContext& context) override {
++        WLabel::setup(node, context);
++        const QString deck = context.selectString(node, "Channel");
++        const QString group = QStringLiteral("[Channel%1]").arg(deck);
++        const QString description = QStringLiteral("Toggle quantize (Deck %1)").arg(deck);
++        setToolTip(description);
++        m_button->setToolTip(description);
++        m_button->setAccessibleName(QStringLiteral("Deck %1 quantize").arg(deck));
++        m_quantize = std::make_unique<ControlProxy>(
++                group, "quantize", this, ControlFlag::NoAssertIfMissing);
++        auto refresh = [this](double enabled) {
++            setHighlight(enabled > 0 ? 1 : 0);
++            m_button->setChecked(enabled > 0);
++        };
++        m_quantize->connectValueChanged(this, refresh);
++        refresh(m_quantize->get());
++
++        if (context.selectBool(node, "Rx3QuantizeValue", false)) {
++            auto* value = new ControlProxy(
++                    group, "rx3_quantize_beats", this, ControlFlag::NoAssertIfMissing);
++            auto refreshValue = [this](double beats) {
++                setText(beats >= 1 ? "1" : beats >= 0.5 ? "1/2" : beats >= 0.25 ? "1/4" : "1/8");
++            };
++            value->connectValueChanged(this, refreshValue);
++            refreshValue(value->get());
++        }
++    }
++
++  protected:
++    void resizeEvent(QResizeEvent* event) override {
++        WLabel::resizeEvent(event);
++        m_button->setGeometry(rect());
++    }
++
++  private:
++    QPushButton* m_button;
++    std::unique_ptr<ControlProxy> m_quantize;
++};
+diff --git a/src/test/rx3quantize_test.cpp b/src/test/rx3quantize_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/test/rx3quantize_test.cpp
+@@ -0,0 +1,134 @@
++#include <gtest/gtest.h>
++#include <QtTest>
++
++#include "control/controlobject.h"
++#include "control/controlpushbutton.h"
++#include "test/mixxxtest.h"
++#include "widget/wrx3quantizelabel.h"
++
++class Rx3QuantizeTest : public MixxxTest {
++  protected:
++    void setupLabel(WRx3QuantizeLabel& label, int deck, bool numeric) {
++        QDomDocument node;
++        ASSERT_TRUE(node.setContent(QStringLiteral(
++                "<Label><Channel>%1</Channel><Text>QUANTIZE</Text>"
++                "<Rx3QuantizeValue>%2</Rx3QuantizeValue></Label>")
++                                           .arg(deck)
++                                           .arg(numeric ? "true" : "false")));
++        SkinContext context(config(), QString());
++        label.setup(node.documentElement(), context);
++        label.resize(92, numeric ? 30 : 18);
++        label.show();
++        QCoreApplication::processEvents();
++    }
++
++    QPushButton* button(WRx3QuantizeLabel& label) {
++        return label.findChild<QPushButton*>(QStringLiteral("RX3QuantizeToggle"));
++    }
++};
++
++TEST_F(Rx3QuantizeTest, CaptionAndValueToggleTheirOwnDeckOncePerClick) {
++    ControlPushButton quantize1(ConfigKey("[Channel1]", "quantize"));
++    ControlPushButton quantize2(ConfigKey("[Channel2]", "quantize"));
++    quantize1.setButtonMode(ControlPushButton::TOGGLE);
++    quantize2.setButtonMode(ControlPushButton::TOGGLE);
++    quantize1.set(1);
++    quantize2.set(0);
++    ControlObject beats1(ConfigKey("[Channel1]", "rx3_quantize_beats"), false, false, false, 0.25);
++    ControlObject beats2(ConfigKey("[Channel2]", "rx3_quantize_beats"), false, false, false, 0.5);
++    WRx3QuantizeLabel caption1, value1, caption2, value2;
++    setupLabel(caption1, 1, false);
++    setupLabel(value1, 1, true);
++    setupLabel(caption2, 2, false);
++    setupLabel(value2, 2, true);
++    ASSERT_TRUE(button(caption1));
++    ASSERT_TRUE(button(value1));
++    ASSERT_TRUE(button(caption2));
++    ASSERT_TRUE(button(value2));
++    QSignalSpy changes1(&quantize1, &ControlObject::valueChanged);
++    QSignalSpy changes2(&quantize2, &ControlObject::valueChanged);
++
++    QTest::mouseClick(button(caption1), Qt::LeftButton);
++    EXPECT_EQ(0, quantize1.get());
++    EXPECT_EQ(0, quantize2.get());
++    EXPECT_EQ(0, caption1.getHighlight());
++    EXPECT_EQ(0, value1.getHighlight());
++    QTest::mouseClick(button(value1), Qt::LeftButton);
++    EXPECT_EQ(1, quantize1.get());
++    EXPECT_EQ(1, caption1.getHighlight());
++    EXPECT_EQ(1, value1.getHighlight());
++    QTest::mouseClick(button(caption2), Qt::LeftButton);
++    EXPECT_EQ(1, quantize1.get());
++    EXPECT_EQ(1, quantize2.get());
++    QTest::mouseClick(button(value2), Qt::LeftButton);
++    EXPECT_EQ(0, quantize2.get());
++    EXPECT_EQ(2, changes1.count());
++    EXPECT_EQ(2, changes2.count());
++    EXPECT_EQ(QStringLiteral("QUANTIZE"), caption1.text());
++    EXPECT_EQ(QStringLiteral("1/4"), value1.text());
++    EXPECT_EQ(QStringLiteral("1/2"), value2.text());
++    EXPECT_EQ(0.25, beats1.get());
++    EXPECT_EQ(0.5, beats2.get());
++}
++
++TEST_F(Rx3QuantizeTest, ControllerChangesUpdateBothLightsAndKeepTheLiveBeatValue) {
++    ControlPushButton quantize(ConfigKey("[Channel1]", "quantize"));
++    ControlObject beats(ConfigKey("[Channel1]", "rx3_quantize_beats"), false, false, false, 1);
++    WRx3QuantizeLabel caption, value;
++    setupLabel(caption, 1, false);
++    setupLabel(value, 1, true);
++    quantize.set(1);
++    EXPECT_EQ(1, caption.getHighlight());
++    EXPECT_EQ(1, value.getHighlight());
++    EXPECT_TRUE(button(caption)->isChecked());
++    EXPECT_TRUE(button(value)->isChecked());
++    beats.set(0.125);
++    EXPECT_EQ(QStringLiteral("1/8"), value.text());
++    quantize.set(0);
++    EXPECT_EQ(0, caption.getHighlight());
++    EXPECT_EQ(0, value.getHighlight());
++    EXPECT_FALSE(button(caption)->isChecked());
++    EXPECT_FALSE(button(value)->isChecked());
++    QTest::mouseClick(button(value), Qt::LeftButton);
++    EXPECT_EQ(1, quantize.get());
++    EXPECT_EQ(0.125, beats.get());
++}
++
++TEST_F(Rx3QuantizeTest, ReleaseOutsideAndRightClickDoNotToggle) {
++    ControlPushButton quantize(ConfigKey("[Channel1]", "quantize"));
++    WRx3QuantizeLabel label;
++    setupLabel(label, 1, false);
++    auto* hitArea = button(label);
++    ASSERT_TRUE(hitArea);
++    QTest::mousePress(hitArea, Qt::LeftButton);
++    EXPECT_EQ(0, quantize.get());
++    QTest::mouseRelease(hitArea, Qt::LeftButton, Qt::NoModifier, QPoint(-10, -10));
++    EXPECT_EQ(0, quantize.get());
++    QTest::mouseClick(hitArea, Qt::RightButton);
++    EXPECT_EQ(0, quantize.get());
++    label.resize(138, 45);
++    QCoreApplication::processEvents();
++    EXPECT_EQ(label.rect(), hitArea->geometry());
++    QTest::mouseClick(hitArea, Qt::LeftButton, Qt::NoModifier, QPoint(130, 40));
++    EXPECT_EQ(1, quantize.get());
++}
++
++TEST_F(Rx3QuantizeTest, TouchTapTogglesOnlyOnceOnRelease) {
++    ControlPushButton quantize(ConfigKey("[Channel1]", "quantize"));
++    WRx3QuantizeLabel label;
++    setupLabel(label, 1, false);
++    auto* hitArea = button(label);
++    ASSERT_TRUE(hitArea);
++    auto* device = QTest::createTouchDevice(QInputDevice::DeviceType::TouchScreen);
++    const QPoint center = hitArea->rect().center();
++    QSignalSpy changes(&quantize, &ControlObject::valueChanged);
++    for (int tap = 0; tap < 2; ++tap) {
++        QTest::touchEvent(hitArea, device).press(0, center, hitArea);
++        QCoreApplication::processEvents();
++        EXPECT_EQ(tap, changes.count());
++        QTest::touchEvent(hitArea, device).release(0, center, hitArea);
++        QCoreApplication::processEvents();
++        EXPECT_EQ(tap + 1, changes.count());
++        EXPECT_EQ(tap == 0 ? 1 : 0, quantize.get());
++    }
++}

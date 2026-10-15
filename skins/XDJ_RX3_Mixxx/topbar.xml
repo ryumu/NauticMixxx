@@ -22,9 +22,7 @@
         <Connection><ConfigKey>[Tab],library</ConfigKey><BindProperty>visible</BindProperty><Transform><Not/></Transform></Connection>
       </WidgetGroup>
 
-      <!-- The RX3 performance display uses this narrow transport rail rather
-           than in-screen navigation. Browse/Sampler switching is driven by
-           the controller's hardware buttons. -->
+      <!-- Keep the narrow transport rail alongside the separate BROWSE action. -->
       <WidgetGroup>
         <ObjectName>RX3ProgressTrack</ObjectName>
         <Layout>horizontal</Layout>
@@ -62,6 +60,12 @@
       </WidgetGroup>
 
       <WidgetGroup><ObjectName>RX3TopbarGap</ObjectName><Size>0me,0me</Size></WidgetGroup>
+      <PushButton>
+        <ObjectName>RX3OpenBrowser</ObjectName><Size>104f,34f</Size><NumberStates>1</NumberStates>
+        <Tooltip>Browse tracks</Tooltip>
+        <State><Number>0</Number><Text>BROWSE</Text></State>
+        <Connection><ConfigKey>[RX3Browser],open</ConfigKey><ConnectValueToWidget>false</ConnectValueToWidget></Connection>
+      </PushButton>
       <WidgetGroup>
         <ObjectName>RX3TopbarStatus</ObjectName>
         <Layout>horizontal</Layout>

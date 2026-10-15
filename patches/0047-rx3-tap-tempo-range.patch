@@ -1,0 +1,207 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2145,6 +2145,7 @@
+     src/test/rekordboxdiscovery_test.cpp
+     src/test/rx3display_test.cpp
+     src/test/rx3quantize_test.cpp
++    src/test/rx3temporange_test.cpp
+     src/test/rx3beatfx_test.cpp
+     src/test/soundreconfiguration_test.cpp
+     src/test/analyserwaveformtest.cpp
+diff --git a/src/widget/wrx3performancewidgets.h b/src/widget/wrx3performancewidgets.h
+--- a/src/widget/wrx3performancewidgets.h
++++ b/src/widget/wrx3performancewidgets.h
+@@ -6,8 +6,11 @@
+ #include <QMouseEvent>
+ #include <QHideEvent>
+ #include <QMenu>
++#include <QPushButton>
++#include <QResizeEvent>
+ #include <memory>
+ #include "control/controlobject.h"
++#include "skin/legacy/skincontext.h"
+ #include "widget/wlabel.h"
+ #include "widget/wpushbutton.h"
+ #include "widget/wwidgetgroup.h"
+@@ -18,16 +21,44 @@
+   public:
+     WRx3RangeBadge(const QString& group, QWidget* parent = nullptr)
+             : WWidgetGroup(parent) {
+-        auto* range = new ControlProxy(group, "rateRange", this, ControlFlag::NoAssertIfMissing);
+-        auto refresh = [this](double value) {
+-            m_range = value;
+-            setHighlight(qAbs(value-0.06)<1e-6 ? 1 : qAbs(value-0.16)<1e-6 ? 2 : value>=1.0 ? 3 : 0);
+-            update();
+-        };
+-        range->connectValueChanged(this, refresh);
+-        refresh(range->get());
+-    }
+-  protected:
++        m_control = new ControlProxy(group, "rateRange", this, ControlFlag::NoAssertIfMissing);
++        m_button = new QPushButton(this);
++        m_button->setObjectName(QStringLiteral("RX3TempoRangeCycle"));
++        m_button->setFlat(true);
++        m_button->setFocusPolicy(Qt::NoFocus);
++        m_button->setCursor(Qt::PointingHandCursor);
++        m_button->setStyleSheet(QStringLiteral(
++                "QPushButton { background:transparent; border:0; padding:0; margin:0;"
++                " min-width:0; min-height:0; }"));
++        m_button->setGeometry(rect());
++        m_button->setAccessibleName(QStringLiteral("%1 tempo range").arg(group));
++        const QString hint = QStringLiteral("Change tempo range: 6%, 10%, 16%, WIDE");
++        setToolTip(hint);
++        m_button->setToolTip(hint);
++        connect(m_button, &QPushButton::clicked, this, [this] {
++            // Use the live control so controller/SHORTCUT changes take effect
++            // before the next tap, including non-preset ranges.
++            const double current = m_control->get();
++            double next = 0.06;
++            for (const double option : {0.06, 0.10, 0.16, 1.0}) {
++                if (option > current + 1e-6) {
++                    next = option;
++                    break;
++                }
++            }
++            m_control->set(next);
++            // ControlProxy suppresses feedback to its own setter.
++            refreshRange(m_control->get());
++        });
++        m_control->connectValueChanged(this, [this](double value) { refreshRange(value); });
++        refreshRange(m_control->get());
++    }
++  protected:
++    void resizeEvent(QResizeEvent* event) override {
++        WWidgetGroup::resizeEvent(event);
++        m_button->setGeometry(rect());
++    }
++
+     void paintEvent(QPaintEvent* event) override {
+         WWidgetGroup::paintEvent(event);
+         QPainter painter(this);
+@@ -44,6 +75,17 @@
+         painter.setPen(QPen(color,1));painter.setBrush(color);painter.drawPath(path);
+     }
+   private:
++    void refreshRange(double value) {
++        m_range = value;
++        setHighlight(qAbs(value-0.06)<1e-6 ? 1 : qAbs(value-0.16)<1e-6 ? 2 : value>=1.0 ? 3 : 0);
++        m_button->setAccessibleDescription(value >= 1.0
++                        ? QStringLiteral("WIDE")
++                        : QStringLiteral("%1%").arg(qRound(value * 100)));
++        update();
++    }
++
++    ControlProxy* m_control = nullptr;
++    QPushButton* m_button = nullptr;
+     double m_range=0.06;
+ };
+ 
+diff --git a/src/test/rx3temporange_test.cpp b/src/test/rx3temporange_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/test/rx3temporange_test.cpp
+@@ -0,0 +1,103 @@
++#include <gtest/gtest.h>
++#include <QtTest>
++
++#include "control/controlpotmeter.h"
++#include "test/mixxxtest.h"
++#include "test/mockedenginebackendtest.h"
++#include "widget/wrx3performancewidgets.h"
++
++class Rx3TempoRangeTest : public MixxxTest {
++  protected:
++    QPushButton* hitArea(WRx3RangeBadge& badge) {
++        badge.resize(50, 20);
++        badge.show();
++        QCoreApplication::processEvents();
++        return badge.findChild<QPushButton*>(QStringLiteral("RX3TempoRangeCycle"));
++    }
++};
++
++TEST_F(Rx3TempoRangeTest, CyclesOnlyItsOwnDeckAndFollowsExternalChanges) {
++    ControlPotmeter range1(ConfigKey("[Channel1]", "rateRange"), 0.01, 4.0);
++    ControlPotmeter range2(ConfigKey("[Channel2]", "rateRange"), 0.01, 4.0);
++    range1.set(0.06);
++    range2.set(0.16);
++    WRx3RangeBadge badge1("[Channel1]"), badge2("[Channel2]");
++    auto* button1 = hitArea(badge1);
++    auto* button2 = hitArea(badge2);
++    ASSERT_TRUE(button1);
++    ASSERT_TRUE(button2);
++    QSignalSpy changes(&range1, &ControlObject::valueChanged);
++    for (const auto expected : {0.10, 0.16, 1.0, 0.06}) {
++        QTest::mouseClick(button1, Qt::LeftButton);
++        EXPECT_DOUBLE_EQ(expected, range1.get());
++        EXPECT_DOUBLE_EQ(0.16, range2.get());
++        EXPECT_EQ(expected == 0.06 ? 1 : expected == 0.16 ? 2 : expected >= 1 ? 3 : 0,
++                badge1.getHighlight());
++    }
++    EXPECT_EQ(4, changes.count());
++    range1.set(0.08);
++    QTest::mouseClick(button1, Qt::LeftButton);
++    EXPECT_DOUBLE_EQ(0.10, range1.get());
++    range1.set(0.50);
++    QTest::mouseClick(button1, Qt::LeftButton);
++    EXPECT_DOUBLE_EQ(1.0, range1.get());
++    EXPECT_EQ(QStringLiteral("WIDE"), button1->accessibleDescription());
++    QTest::mouseClick(button2, Qt::LeftButton);
++    EXPECT_DOUBLE_EQ(1.0, range2.get());
++    EXPECT_EQ(3, badge2.getHighlight());
++}
++
++TEST_F(Rx3TempoRangeTest, TouchTapAdvancesOnceOnRelease) {
++    ControlPotmeter range(ConfigKey("[Channel1]", "rateRange"), 0.01, 4.0);
++    range.set(0.06);
++    WRx3RangeBadge badge("[Channel1]");
++    auto* button = hitArea(badge);
++    ASSERT_TRUE(button);
++    auto* device = QTest::createTouchDevice(QInputDevice::DeviceType::TouchScreen);
++    const QPoint center = button->rect().center();
++    QSignalSpy changes(&range, &ControlObject::valueChanged);
++    QTest::touchEvent(button, device).press(0, center, button);
++    QCoreApplication::processEvents();
++    EXPECT_DOUBLE_EQ(0.06, range.get());
++    QTest::touchEvent(button, device).release(0, center, button);
++    QCoreApplication::processEvents();
++    EXPECT_DOUBLE_EQ(0.10, range.get());
++    EXPECT_EQ(1, changes.count());
++}
++
++TEST_F(Rx3TempoRangeTest, OutsideReleaseAndRightClickCancelAndResizedAreaRemainsClickable) {
++    ControlPotmeter range(ConfigKey("[Channel1]", "rateRange"), 0.01, 4.0);
++    range.set(0.06);
++    WRx3RangeBadge badge("[Channel1]");
++    auto* button = hitArea(badge);
++    ASSERT_TRUE(button);
++    QTest::mousePress(button, Qt::LeftButton);
++    QTest::mouseRelease(button, Qt::LeftButton, Qt::NoModifier, QPoint(-10, -10));
++    EXPECT_DOUBLE_EQ(0.06, range.get());
++    QTest::mouseClick(button, Qt::RightButton);
++    EXPECT_DOUBLE_EQ(0.06, range.get());
++    badge.resize(75, 30);
++    QCoreApplication::processEvents();
++    EXPECT_EQ(badge.rect(), button->geometry());
++    QTest::mouseClick(button, Qt::LeftButton, Qt::NoModifier, QPoint(70, 25));
++    EXPECT_DOUBLE_EQ(0.10, range.get());
++}
++
++class Rx3TempoRangeEngineTest : public MockedEngineBackendTest {};
++
++TEST_F(Rx3TempoRangeEngineTest, ChangingRangePreservesPlaybackRateInTheRealEngine) {
++    const ConfigKey range(m_sGroup1, "rateRange"), ratio(m_sGroup1, "rate_ratio");
++    ControlObject::set(range, 0.06);
++    ControlObject::set(ratio, 1.025);
++    WRx3RangeBadge badge(m_sGroup1);
++    badge.resize(50, 20);
++    badge.show();
++    QCoreApplication::processEvents();
++    auto* button = badge.findChild<QPushButton*>(QStringLiteral("RX3TempoRangeCycle"));
++    ASSERT_TRUE(button);
++    for (const auto expected : {0.10, 0.16, 1.0, 0.06}) {
++        QTest::mouseClick(button, Qt::LeftButton);
++        EXPECT_DOUBLE_EQ(expected, ControlObject::get(range));
++        EXPECT_NEAR(1.025, ControlObject::get(ratio), 1e-12);
++    }
++}

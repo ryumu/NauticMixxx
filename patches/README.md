@@ -518,3 +518,36 @@ occupied endpoints, to avoid counting one extra pixel with Linux font substituti
   This avoids incompatible conditional-expression types with `QT_USE_QSTRINGBUILDER`.
 - Include `ControlObject` directly in the waveform viewer so the shared zoom
   handler also compiles when precompiled headers are disabled.
+
+## 0046 — Click and tap deck QUANTIZE
+
+- Make both the QUANTIZE caption and live beat-value label toggle the native
+  `quantize` control of their own deck. Preserve the selected beat interval.
+- Use a transparent native button over the existing label to retain its
+  typography and highlight state, with release-outside cancellation and an
+  accessible checkable action. Controller changes update both labels.
+- Keep OFF labels dimmed so the touch target remains visible. ON uses the
+  existing accent color.
+- Cover independent decks, external state updates, cancelled/right clicks,
+  resized hit areas and single activation per touchscreen tap.
+
+## 0047 — Tap tempo range
+
+- Cycle the existing range badge through 6%, 10%, 16% and WIDE with a click
+  or tap, independently for each deck. Preserve its rendering and highlight
+  colors; external controller changes remain authoritative.
+- Advance non-preset ranges to the next larger preset and wrap WIDE to 6%.
+- Reuse native button release/cancel semantics and retain the current playback
+  rate through the engine's normal range control.
+- Test deck isolation, live feedback, single touch activation, cancellation,
+  resized hit areas and playback-rate preservation with the real engine.
+
+## 0048 — Browser touch loading and screen navigation
+
+- Add LOAD 1 and LOAD 2 to the browser header, using the same deck-specific
+  `LoadSelectedTrack` controls as hardware. Do not start playback or select an
+  arbitrary free deck. Disable unavailable/locked targets and recheck on click.
+- Keep selection/scroll state when returning to PERFORMANCE. The skin's BROWSE
+  button opens the existing browser again, so both directions work on screen.
+- Test empty/cleared selections, exact deck routing, live load protection,
+  touch-release activation, cancellation and header layout at 1280/1920 widths.

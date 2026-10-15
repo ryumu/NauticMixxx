@@ -59,6 +59,7 @@
               </TrackProperty>
               <Label><ObjectName>TrackNoPlayMode</ObjectName><Text>CONTINUE</Text></Label>
               <Label>
+                <Rx3QuantizeToggle>true</Rx3QuantizeToggle><Channel><Variable name="channel"/></Channel>
                 <ObjectName>TrackNoQuantize</ObjectName><Text>QUANTIZE</Text>
                 <Connection><ConfigKey>[Channel<Variable name="channel"/>],quantize</ConfigKey><BindProperty>highlight</BindProperty></Connection>
               </Label>

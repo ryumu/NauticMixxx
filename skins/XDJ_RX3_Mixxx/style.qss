@@ -3027,8 +3027,8 @@ WEffectSelector#RX3BeatFxSelector {
 #TrackNoCaption { min-height: 16px; max-height: 16px; }
 #TrackNoValue { min-height: 30px; max-height: 30px; }
 #TrackNoPlayMode { min-height: 17px; max-height: 17px; }
-#TrackNoQuantize { min-height: 18px; max-height: 18px; color: transparent; }
-#TrackNoQuantizeValue { min-height: 30px; max-height: 30px; color: transparent; }
+#TrackNoQuantize { min-height: 18px; max-height: 18px; color: #747474; }
+#TrackNoQuantizeValue { min-height: 30px; max-height: 30px; color: #747474; }
 #TrackNoQuantize[highlight="1"], #TrackNoQuantizeValue[highlight="1"] { color: #ff7800; }
 #DeckHeaderBpm { min-width: 104px; max-width: 104px; border-color: #ddd; padding: 0; }
 #DeckHeaderBpm[highlight="1"] { border-color: #ff7800; }
@@ -3260,3 +3260,10 @@ QPushButton[rx3Bank="true"]:disabled { color: #777; }
 #RX3StatusTabs { min-height: 44px; max-height: 44px; background: #000; border: 1px solid #777; padding: 2px; margin: 0; }
 #RX3StatusTabs #RX3StatusTab { min-height: 36px; max-height: 36px; margin: 0; padding: 0; font-size: 18px; font-weight: normal; background: #000; color: #888; }
 #RX3StatusTabs #RX3StatusTab[displayValue="1"] { background: #9b9e99; color: #101010; }
+
+/* Touch navigation between PERFORMANCE and BROWSER. */
+#RX3OpenBrowser { background: #202020; color: #ddd; border: 1px solid #555; font-size: 14px; padding: 0; }
+#RX3OpenBrowser:pressed { background: #007ce0; color: #fff; }
+#RX3BrowserHeader #RX3BrowserLoad1, #RX3BrowserHeader #RX3BrowserLoad2 { border: 1px solid #008baa; }
+#RX3BrowserHeader #RX3BrowserLoad1:disabled, #RX3BrowserHeader #RX3BrowserLoad2:disabled { border-color: #444; color: #777; }
+#RX3BrowserHeader #RX3BrowserPerformance { border: 1px solid #777; }

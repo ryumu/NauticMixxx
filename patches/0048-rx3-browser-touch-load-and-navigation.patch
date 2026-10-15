@@ -1,0 +1,389 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2146,6 +2146,7 @@
+     src/test/rx3display_test.cpp
+     src/test/rx3quantize_test.cpp
+     src/test/rx3temporange_test.cpp
++    src/test/rx3browserload_test.cpp
+     src/test/rx3beatfx_test.cpp
+     src/test/soundreconfiguration_test.cpp
+     src/test/analyserwaveformtest.cpp
+diff --git a/src/widget/wrx3browser.h b/src/widget/wrx3browser.h
+--- a/src/widget/wrx3browser.h
++++ b/src/widget/wrx3browser.h
+@@ -23,7 +23,10 @@
+ #include <QPainter>
+ #include <QStyledItemDelegate>
+ #include <QScroller>
++#include <QShowEvent>
++#include <array>
+ #include "library/library.h"
++#include "library/library_prefs.h"
+ #include "library/rekordbox/rekordboxfeature.h"
+ #include "library/trackcollectionmanager.h"
+ #include "library/trackcollection.h"
+@@ -123,6 +126,7 @@
+ // native loading, search, playlists and USB discovery; no duplicate database.
+ class WRx3Browser : public QWidget, public WBaseWidget {
+     friend struct Rx3BrowserTestAccess;
++    friend struct Rx3BrowserLoadTestAccess;
+   public:
+     WRx3Browser(WLibrary* library, WLibrarySidebar* sidebar, Library* backend, QWidget* parent, UserSettingsPointer config = {})
+             : QWidget(parent), WBaseWidget(this), m_config(std::move(config)), m_library(library), m_backend(backend), m_sidebar(sidebar) {
+@@ -168,6 +172,24 @@
+         m_search = new QLineEdit(header); m_search->setPlaceholderText("SEARCH"); m_search->hide(); detailRow->addWidget(m_search,1);
+         m_searchCount=new QLabel("0",header);m_searchCount->setObjectName("RX3SearchCount");m_searchCount->hide();detailRow->addWidget(m_searchCount);
+         m_infoButton = new QPushButton("◀  INFO", header);h->addWidget(m_infoButton);m_headerButtons.push_back(m_infoButton);
++        for (int deck = 1; deck <= 2; ++deck) {
++            auto* button = addHeader(QStringLiteral("LOAD %1").arg(deck),
++                    QStringLiteral("RX3BrowserLoad%1").arg(deck),
++                    [this, deck] { loadSelectedToDeck(deck); });
++            button->setAccessibleName(QStringLiteral("Load selected track to deck %1").arg(deck));
++            button->setFocusPolicy(Qt::NoFocus);
++            button->setMinimumWidth(80);
++            button->setEnabled(false);
++            m_loadButtons[deck - 1] = button;
++        }
++        auto* performance = addHeader("PERFORMANCE", "RX3BrowserPerformance", [this] {
++            if (ControlObject::exists(ConfigKey("[Skin]", "show_maximized_library")))
++                ControlObject::set(ConfigKey("[Skin]", "show_maximized_library"), 0);
++            ControlObject::set(ConfigKey("[Tab]", "current"), 0);
++        });
++        performance->setAccessibleName("Return to performance screen");
++        performance->setToolTip("Return to performance screen");
++        performance->setFocusPolicy(Qt::NoFocus);
+         layout->addWidget(header);
+         m_pages = new QStackedWidget(this); layout->addWidget(m_pages, 1);
+         auto* browse = new QWidget(m_pages); auto* b = new QHBoxLayout(browse);
+@@ -337,6 +359,10 @@
+ 
+         for(int deck=1;deck<=2;++deck) {
+             const auto group=QString("[Channel%1]").arg(deck);
++            for (const auto& key : {"play", "rx3_source_lost"}) {
++                auto* state = new ControlProxy(group, key, this, ControlFlag::NoAssertIfMissing);
++                state->connectValueChanged(this, [this](double) { updateLoadButtons(); });
++            }
+             if(ControlObject::exists(ConfigKey(group,"rx3_track_end"))) {
+                 auto* ended=new ControlProxy(group,"rx3_track_end",this);
+                 ended->connectValueChanged(this,[this,deck](double value){if(value>0) advanceContinuous(deck);});
+@@ -346,7 +372,7 @@
+             if(ControlObject::exists(ConfigKey("[App]",count.first)) && ControlObject::get(ConfigKey("[App]",count.first))<count.second)
+                 ControlObject::set(ConfigKey("[App]",count.first),count.second);
+         auto* workflowTimer=new QTimer(this);workflowTimer->setInterval(1000);
+-        connect(workflowTimer,&QTimer::timeout,this,[this]{refreshSessionWork();});workflowTimer->start();
++        connect(workflowTimer,&QTimer::timeout,this,[this]{refreshSessionWork();updateLoadButtons();});workflowTimer->start();
+         QTimer::singleShot(0, this, [this]{ showSources(); refreshTable(); });
+         connect(m_sidebar->model(), &QAbstractItemModel::rowsInserted, this, [this]{ onDeviceModelChanged(); });
+         connect(m_sidebar->model(), &QAbstractItemModel::rowsRemoved, this, [this]{ onDeviceModelChanged(); });
+@@ -406,6 +432,11 @@
+         }
+     }
+   protected:
++    void showEvent(QShowEvent* event) override {
++        QWidget::showEvent(event);
++        QTimer::singleShot(0, this, [this] { updateLoadButtons(); });
++    }
++
+     void hideEvent(QHideEvent* event) override {
+         if(m_toolPreview) m_toolPreview->cancel();
+         m_resumeFocus=m_focus;
+@@ -476,6 +507,7 @@
+             auto* button=m_headerButtons[i];button->setProperty("active",i==selected);
+             button->style()->unpolish(button);button->style()->polish(button);button->update();
+         }
++        updateLoadButtons();
+     }
+     void updateNavigationHighlight() {
+         updateHeaderHighlight();
+@@ -717,9 +749,64 @@
+             }
+             if(auto* selection=table->selectionModel();selection && !selection->property("rx3SelectionConnected").toBool()) {
+                 selection->setProperty("rx3SelectionConnected",true);
+-                connect(selection,&QItemSelectionModel::currentRowChanged,this,[this]{updateTrackInfo();});
+-            }
+-        }
++                connect(selection,&QItemSelectionModel::currentRowChanged,this,[this]{updateTrackInfo();updateLoadButtons();});
++                connect(selection,&QItemSelectionModel::selectionChanged,this,[this]{updateLoadButtons();});
++            }
++        }
++        updateLoadButtons();
++    }
++
++    WTrackTableView* selectedLoadTable() const {
++        if (m_pages->currentIndex() != 0 || m_level != BrowserLevel::Tracks ||
++                !m_library->isVisible() ||
++                (ControlObject::exists(ConfigKey("[Tab]", "current")) &&
++                        qRound(ControlObject::get(ConfigKey("[Tab]", "current"))) != 1))
++            return nullptr;
++        auto* table = m_library->getCurrentTrackTableView();
++        return table && table->model() && table->selectionModel() &&
++                        table->selectionModel()->hasSelection()
++                ? table : nullptr;
++    }
++
++    bool canLoadToDeck(int deck) const {
++        if (deck < 1 || deck > 2 || !selectedLoadTable()) return false;
++        const QString group = QStringLiteral("[Channel%1]").arg(deck);
++        if (!ControlObject::exists(ConfigKey(group, "LoadSelectedTrack"))) return false;
++        bool allowWhilePlaying = false;
++        if (m_config) {
++            if (m_config->exists(kConfigKeyLoadWhenDeckPlaying)) {
++                const auto mode = static_cast<LoadWhenDeckPlaying>(
++                        m_config->getValue<int>(kConfigKeyLoadWhenDeckPlaying));
++                allowWhilePlaying = mode == LoadWhenDeckPlaying::Allow ||
++                        mode == LoadWhenDeckPlaying::AllowButStopDeck;
++            } else {
++                allowWhilePlaying = m_config->getValue<bool>(kConfigKeyAllowTrackLoadToPlayingDeck);
++            }
++        }
++        return allowWhilePlaying || ControlObject::get(ConfigKey(group, "play")) <= 0 ||
++                ControlObject::get(ConfigKey(group, "rx3_source_lost")) > 0;
++    }
++
++    void updateLoadButtons() {
++        for (int deck = 1; deck <= 2; ++deck) {
++            auto* button = m_loadButtons[deck - 1];
++            if (!button) continue;
++            const bool ready = canLoadToDeck(deck);
++            button->setEnabled(ready);
++            button->setToolTip(ready ? QStringLiteral("Load selected track to deck %1").arg(deck)
++                    : !selectedLoadTable() ? QStringLiteral("Select a track first")
++                    : QStringLiteral("Deck %1 is unavailable or protected by Load Lock").arg(deck));
++        }
++    }
++
++    void loadSelectedToDeck(int deck) {
++        // Recheck at activation time; button state alone is not a load guard.
++        if (!canLoadToDeck(deck)) { updateLoadButtons(); return; }
++        const ConfigKey load(QStringLiteral("[Channel%1]").arg(deck), "LoadSelectedTrack");
++        // Use the same LibraryControl boundary as hardware LOAD. In particular,
++        // never choose an arbitrary stopped deck or use LoadSelectedTrackAndPlay.
++        ControlObject::set(load, 1);
++        ControlObject::set(load, 0);
+     }
+     bool selectInfoRoot(const QString& root) {
+         if(!m_backend || !m_backend->rekordboxFeature()->catalogForRoot(root)) return false;
+@@ -1458,6 +1545,7 @@
+     WRx3ToolMenu* m_sourceMenu;
+     QString m_settingsRoot;
+     QList<QPushButton*> m_headerButtons;
++    std::array<QPushButton*, 2> m_loadButtons{};
+     int m_sourceActionIndex=-1;
+     QPushButton* m_breadcrumb;
+     QLabel* m_info;
+diff --git a/src/test/rx3browserload_test.cpp b/src/test/rx3browserload_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/test/rx3browserload_test.cpp
+@@ -0,0 +1,210 @@
++#include <gtest/gtest.h>
++#include <QtTest>
++#include <QStandardItemModel>
++#include <QScreen>
++
++#include "control/controlpushbutton.h"
++#include "test/mixxxtest.h"
++#include "widget/wrx3browser.h"
++
++// Use a selection-only table: row painting and SQL/provider projection are
++// tested separately. The real hardware LOAD controls remain the boundary.
++class BrowserLoadTable : public WTrackTableView {
++  public:
++    explicit BrowserLoadTable(UserSettingsPointer config)
++            : WTrackTableView(nullptr, config, nullptr, 0.0) {}
++  protected:
++    void selectionChanged(const QItemSelection& selected, const QItemSelection& deselected) override {
++        QTableView::selectionChanged(selected, deselected);
++    }
++    void currentChanged(const QModelIndex& current, const QModelIndex& previous) override {
++        QTableView::currentChanged(current, previous);
++    }
++};
++
++struct Rx3BrowserLoadTestAccess {
++    static void tracks(WRx3Browser& browser) {
++        browser.m_pages->setCurrentIndex(0);
++        browser.m_level = WRx3Browser::BrowserLevel::Tracks;
++        browser.m_preview->hide();
++        browser.m_loading->hide();
++        browser.m_emptySpace->hide();
++        browser.m_library->show();
++        browser.refreshTable();
++    }
++    static void refresh(WRx3Browser& browser) { browser.updateLoadButtons(); }
++};
++
++class Rx3BrowserLoadTest : public MixxxTest {
++  protected:
++    void SetUp() override {
++        PlayerInfo::create();
++        tab = std::make_unique<ControlObject>(ConfigKey("[Tab]", "current"), false, false, false, 1);
++        maximized = std::make_unique<ControlObject>(ConfigKey("[Skin]", "show_maximized_library"), false, false, false, 1);
++        for (int deck = 1; deck <= 2; ++deck) {
++            const QString group = QStringLiteral("[Channel%1]").arg(deck);
++            play[deck - 1] = std::make_unique<ControlPushButton>(ConfigKey(group, "play"));
++            lost[deck - 1] = std::make_unique<ControlObject>(ConfigKey(group, "rx3_source_lost"));
++            load[deck - 1] = std::make_unique<ControlPushButton>(ConfigKey(group, "LoadSelectedTrack"));
++        }
++        config()->setValue(kConfigKeyLoadWhenDeckPlaying, int(LoadWhenDeckPlaying::Reject));
++        library = new WLibrary(nullptr);
++        table = new BrowserLoadTable(config());
++        rows.setRowCount(3); rows.setColumnCount(2);
++        for (int row = 0; row < 3; ++row) rows.setData(rows.index(row, 0), QStringLiteral("Track %1").arg(row));
++        table->setModel(&rows);
++        table->setSelectionBehavior(QAbstractItemView::SelectRows);
++        library->addWidget(table);
++        auto* sidebar = new WLibrarySidebar;
++        sidebar->setModel(&devices);
++        browser = std::make_unique<WRx3Browser>(library, sidebar, nullptr, nullptr, config());
++        QFile style(qEnvironmentVariable("NAUTIC_RX3_STYLESHEET"));
++        if (style.open(QIODevice::ReadOnly)) browser->setStyleSheet(QString::fromUtf8(style.readAll()));
++        browser->resize(1280, 690); browser->show();
++        QCoreApplication::processEvents();
++    }
++
++    void TearDown() override {
++        browser.reset();
++        PlayerInfo::destroy();
++    }
++
++    QPushButton* button(const QString& name) const {
++        return browser->findChild<QPushButton*>(name);
++    }
++    void selectTrack() {
++        Rx3BrowserLoadTestAccess::tracks(*browser);
++        table->selectRow(1);
++        QCoreApplication::processEvents();
++        Rx3BrowserLoadTestAccess::refresh(*browser);
++    }
++
++    QStandardItemModel rows;
++    SidebarModel devices;
++    WLibrary* library = nullptr;
++    BrowserLoadTable* table = nullptr;
++    std::unique_ptr<WRx3Browser> browser;
++    std::unique_ptr<ControlObject> tab, maximized;
++    std::array<std::unique_ptr<ControlPushButton>, 2> play, load;
++    std::array<std::unique_ptr<ControlObject>, 2> lost;
++};
++
++TEST_F(Rx3BrowserLoadTest, NoSelectionDisablesLoadsAndPerformanceDoesNotChangeTransport) {
++    auto* load1 = button("RX3BrowserLoad1");
++    auto* load2 = button("RX3BrowserLoad2");
++    auto* back = button("RX3BrowserPerformance");
++    ASSERT_TRUE(load1); ASSERT_TRUE(load2); ASSERT_TRUE(back);
++    EXPECT_FALSE(load1->isEnabled()); EXPECT_FALSE(load2->isEnabled());
++    QSignalSpy requests(load[0].get(), &ControlObject::valueChanged);
++    play[0]->set(1);
++    QTest::mouseClick(back, Qt::LeftButton);
++    EXPECT_EQ(0, tab->get()); EXPECT_EQ(0, maximized->get());
++    EXPECT_EQ(1, play[0]->get()); EXPECT_EQ(0, play[1]->get());
++    EXPECT_EQ(0, requests.count());
++}
++
++TEST_F(Rx3BrowserLoadTest, EachButtonPulsesOnlyItsNamedHardwareLoadAndKeepsSelection) {
++    selectTrack();
++    auto* load1 = button("RX3BrowserLoad1");
++    auto* load2 = button("RX3BrowserLoad2");
++    ASSERT_TRUE(load1->isEnabled()); ASSERT_TRUE(load2->isEnabled());
++    QSignalSpy requests1(load[0].get(), &ControlObject::valueChanged);
++    QSignalSpy requests2(load[1].get(), &ControlObject::valueChanged);
++    QTest::mouseClick(load1, Qt::LeftButton);
++    ASSERT_EQ(2, requests1.count()); EXPECT_EQ(0, requests2.count());
++    EXPECT_EQ(1, requests1.at(0).at(0).toDouble()); EXPECT_EQ(0, requests1.at(1).at(0).toDouble());
++    QTest::mouseClick(load2, Qt::LeftButton);
++    EXPECT_EQ(2, requests1.count()); ASSERT_EQ(2, requests2.count());
++    EXPECT_EQ(0, load[0]->get()); EXPECT_EQ(0, load[1]->get());
++    EXPECT_EQ(0, play[0]->get()); EXPECT_EQ(0, play[1]->get());
++    EXPECT_EQ(1, table->currentIndex().row()); EXPECT_EQ(1, tab->get());
++    table->clearSelection();
++    EXPECT_FALSE(load1->isEnabled()); EXPECT_FALSE(load2->isEnabled());
++}
++
++TEST_F(Rx3BrowserLoadTest, PlayingDeckIsProtectedAndGuardIsRecheckedOnActivation) {
++    selectTrack();
++    auto* load1 = button("RX3BrowserLoad1");
++    auto* load2 = button("RX3BrowserLoad2");
++    QSignalSpy requests(load[0].get(), &ControlObject::valueChanged);
++    play[0]->set(1);
++    EXPECT_FALSE(load1->isEnabled()); EXPECT_TRUE(load2->isEnabled());
++    // A queued click must not bypass a newly changed load policy/state.
++    ASSERT_TRUE(QMetaObject::invokeMethod(load1, "clicked", Qt::DirectConnection, Q_ARG(bool, false)));
++    EXPECT_EQ(0, requests.count());
++    config()->setValue(kConfigKeyLoadWhenDeckPlaying, int(LoadWhenDeckPlaying::Allow));
++    Rx3BrowserLoadTestAccess::refresh(*browser);
++    EXPECT_TRUE(load1->isEnabled());
++    QTest::mouseClick(load1, Qt::LeftButton);
++    EXPECT_EQ(2, requests.count());
++    config()->setValue(kConfigKeyLoadWhenDeckPlaying, int(LoadWhenDeckPlaying::Reject));
++    lost[0]->set(1);
++    EXPECT_TRUE(load1->isEnabled());
++}
++
++TEST_F(Rx3BrowserLoadTest, TouchReleaseLoadsOnceAndOutsideReleaseDoesNotLoad) {
++    selectTrack();
++    auto* load1 = button("RX3BrowserLoad1");
++    QSignalSpy requests(load[0].get(), &ControlObject::valueChanged);
++    auto* device = QTest::createTouchDevice(QInputDevice::DeviceType::TouchScreen);
++    const auto center = load1->rect().center();
++    // Native touch events use screen coordinates. The offscreen platform's
++    // virtual display may be narrower than the reference browser canvas.
++    const QRect screen = load1->screen()->geometry();
++    browser->QWidget::move(browser->pos() + screen.center() - load1->mapToGlobal(center));
++    QCoreApplication::processEvents();
++    ASSERT_TRUE(screen.contains(load1->mapToGlobal(center)));
++    ASSERT_TRUE(load1->isEnabled());
++    QTest::touchEvent(load1, device).press(0, center, load1);
++    QCoreApplication::processEvents();
++    EXPECT_EQ(0, requests.count());
++    QTest::touchEvent(load1, device).release(0, center, load1);
++    QCoreApplication::processEvents();
++    EXPECT_EQ(2, requests.count());
++    QTest::mousePress(load1, Qt::LeftButton);
++    QTest::mouseRelease(load1, Qt::LeftButton, Qt::NoModifier, QPoint(-10, -10));
++    EXPECT_EQ(2, requests.count());
++}
++
++TEST_F(Rx3BrowserLoadTest, PerformanceAndBrowseRoundTripPreservesSelectedTrackAndPlayback) {
++    selectTrack();
++    QObject::connect(tab.get(), &ControlObject::valueChanged, browser.get(), [this](double value) {
++        browser->setVisible(qRound(value) == 1);
++    });
++    play[1]->set(1);
++    QSignalSpy loads1(load[0].get(), &ControlObject::valueChanged);
++    QSignalSpy loads2(load[1].get(), &ControlObject::valueChanged);
++    QTest::mouseClick(button("RX3BrowserPerformance"), Qt::LeftButton);
++    EXPECT_EQ(0, tab->get()); EXPECT_FALSE(browser->isVisible());
++    ControlObject::set(ConfigKey("[RX3Browser]", "open"), 1);
++    ControlObject::set(ConfigKey("[RX3Browser]", "open"), 0);
++    QCoreApplication::processEvents();
++    EXPECT_EQ(1, tab->get()); EXPECT_TRUE(browser->isVisible());
++    EXPECT_EQ(1, table->currentIndex().row());
++    EXPECT_TRUE(table->selectionModel()->isRowSelected(1, QModelIndex()));
++    EXPECT_EQ(0, play[0]->get()); EXPECT_EQ(1, play[1]->get());
++    EXPECT_EQ(0, loads1.count()); EXPECT_EQ(0, loads2.count());
++}
++
++TEST_F(Rx3BrowserLoadTest, HeaderActionsRemainReachableAtReferenceAndPanelSizes) {
++    const QString output = qEnvironmentVariable("NAUTIC_BROWSER_LOAD_ARTIFACTS");
++    for (const auto size : {QSize(1280, 690), QSize(1920, 1090)}) {
++        browser->resize(size);
++        QCoreApplication::processEvents();
++        int rightEdge = 0;
++        for (const auto& name : {"RX3BrowserLoad1", "RX3BrowserLoad2", "RX3BrowserPerformance"}) {
++            auto* action = button(name);
++            ASSERT_TRUE(action);
++            const QPoint position = action->mapTo(browser.get(), QPoint());
++            EXPECT_GE(position.x(), rightEdge);
++            EXPECT_LE(position.x() + action->width(), browser->width());
++            EXPECT_GT(action->height(), 30);
++            rightEdge = position.x() + action->width();
++        }
++        if (!output.isEmpty()) {
++            ASSERT_TRUE(QDir().mkpath(output));
++            ASSERT_TRUE(browser->grab().save(QDir(output).filePath(
++                    QStringLiteral("browser-header-%1.png").arg(size.width()))));
++        }
++    }
++}

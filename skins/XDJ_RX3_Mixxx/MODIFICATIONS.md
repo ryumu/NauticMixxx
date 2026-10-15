@@ -1,5 +1,28 @@
 # Modificaciones de la variante RX3
 
+## Navegación y carga desde la pantalla
+
+- BROWSE abre el navegador desde la pantalla de actuación; PERFORMANCE regresa
+  sin cambiar el transporte ni cargar otra pista.
+- LOAD 1 y LOAD 2 cargan la fila seleccionada en el deck indicado mediante los
+  mismos controles que los botones físicos. La selección vacía y LOAD LOCK
+  desactivan los botones; la autorización se comprueba de nuevo al pulsarlos.
+
+## TEMPO RANGE táctil
+
+- El indicador de rango alterna 6%, 10%, 16% y WIDE con un clic o toque,
+  independientemente para cada deck. Los cambios del controlador se reflejan
+  inmediatamente; un rango personalizado avanza al siguiente preset mayor.
+- La operación conserva la velocidad de reproducción actual y los colores del
+  indicador. Soltar fuera del área cancela el cambio.
+
+## Interacción táctil de QUANTIZE
+
+- El texto QUANTIZE y su valor de beat alternan el estado del deck correspondiente
+  con un clic o toque. Ambos reflejan también los cambios del controlador.
+- El estado OFF conserva el texto gris para localizar el área táctil; ON mantiene
+  el color de acento. El valor de beat no cambia al activar o desactivar QUANTIZE.
+
 ## 0.13.0 — estados de reproducción y correcciones visuales
 
 - MASTER exclusivo, con traspaso al deck que continúa sonando, sin modificar transporte ni sincronización. Contador BARS y recuadro BPM siguen el mismo estado.
