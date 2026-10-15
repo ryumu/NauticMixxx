@@ -100,8 +100,8 @@ def validate_metadata() -> list[str]:
         errors.append("el título de la skin no es NauticMixxx")
     if skin.findtext("manifest/version") != VERSION:
         errors.append("la versión de la skin no coincide con VERSION")
-    if len(list((ROOT / "patches").glob("00[0-9][0-9]-*.patch"))) != 48:
-        errors.append("deben existir exactamente cuarenta y ocho parches numerados")
+    if len(list((ROOT / "patches").glob("00[0-9][0-9]-*.patch"))) != 49:
+        errors.append("deben existir exactamente cuarenta y nueve parches numerados")
     required = [
         ROOT / "branding/iCon.icon/icon.json",
         ROOT / "branding/NauticMixxx.png",

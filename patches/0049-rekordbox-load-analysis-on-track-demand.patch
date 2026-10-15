@@ -1,0 +1,609 @@
+diff --git a/src/library/rekordbox/rekordboxruntimecatalog.cpp b/src/library/rekordbox/rekordboxruntimecatalog.cpp
+--- a/src/library/rekordbox/rekordboxruntimecatalog.cpp
++++ b/src/library/rekordbox/rekordboxruntimecatalog.cpp
+@@ -32,6 +32,24 @@
+     auto it=m_tracks.find(id);
+     if(!m_valid || it==m_tracks.end() || rating<0 || rating>5) return false;
+     it->rating=quint32(rating);it->rawMetadata.insert("rating",rating);
++    return true;
++}
++
++bool RuntimeCatalog::publishAnalysis(const RuntimeTrack& track) {
++    const std::lock_guard<std::mutex> lock(m_mutex);
++    auto it = m_tracks.find(track.rekordboxId);
++    if (!m_valid || !m_sealed || it == m_tracks.end() ||
++            it->audioRelativePath != track.audioRelativePath ||
++            it->anlzRelativePath != track.anlzRelativePath ||
++            it->analysisState != RuntimeAnalysisState::Unknown ||
++            track.analysisState == RuntimeAnalysisState::Unknown) return false;
++    it->cues = track.cues;
++    it->beats = track.beats;
++    it->waveforms = track.waveforms;
++    it->analysisFingerprints = track.analysisFingerprints;
++    it->unmappedAnalysisSections = track.unmappedAnalysisSections;
++    it->analysisState = track.analysisState;
++    it->diagnostics = track.diagnostics;
+     return true;
+ }
+ 
+diff --git a/src/library/rekordbox/rekordboxruntimecatalog.h b/src/library/rekordbox/rekordboxruntimecatalog.h
+--- a/src/library/rekordbox/rekordboxruntimecatalog.h
++++ b/src/library/rekordbox/rekordboxruntimecatalog.h
+@@ -164,6 +164,8 @@
+     bool appendPlaylist(RuntimePlaylistNode playlist);
+     bool appendHistory(DatabaseHistory history);
+     bool updatePerformance(const RuntimeTrack& track);
++    // Publish one lazily inspected track without replacing PDB metadata/rating.
++    bool publishAnalysis(const RuntimeTrack& track);
+     bool updateRating(quint32 id,int rating);
+     // Atomic subtree insertion. Tracks must exist before playlists reference
+     // them; duplicate entries in a playlist are allowed and order is preserved.
+diff --git a/src/library/rekordbox/rekordboxruntimetrackmodel.cpp b/src/library/rekordbox/rekordboxruntimetrackmodel.cpp
+--- a/src/library/rekordbox/rekordboxruntimetrackmodel.cpp
++++ b/src/library/rekordbox/rekordboxruntimetrackmodel.cpp
+@@ -308,10 +308,15 @@
+     const auto* track = trackAt(index);
+     if (!track || !m_session) return;
+     const quint32 rekordboxId = track->rekordboxId;
++    // Painting/scrolling must not start analysis reads. Once a track has been
++    // loaded, use its session analysis (the row snapshot predates that load).
++    const auto catalog = m_session->catalog();
++    const auto inspected = catalog ? catalog->findTrack(rekordboxId) : std::nullopt;
++    if (!inspected || inspected->analysisState == RuntimeAnalysisState::Unknown) return;
+     const quint64 key = quint64(rekordboxId) * 3 + int(mode);
+     if (m_waveformPreviewCache.contains(key) || m_pendingWaveformPreviews.contains(key)) return;
+ 
+-    auto descriptors = track->waveforms;
++    auto descriptors = inspected->waveforms;
+     std::stable_sort(descriptors.begin(), descriptors.end(), [mode](const auto& a, const auto& b) {
+         return previewWaveformPriority(a.sectionTag, mode) < previewWaveformPriority(b.sectionTag, mode);
+     });
+diff --git a/src/library/rekordbox/rekordboxusbsession.cpp b/src/library/rekordbox/rekordboxusbsession.cpp
+--- a/src/library/rekordbox/rekordboxusbsession.cpp
++++ b/src/library/rekordbox/rekordboxusbsession.cpp
+@@ -151,7 +151,7 @@
+             : (corrupt ? RuntimeAnalysisState::Invalid : RuntimeAnalysisState::Missing);
+ }
+ 
+-bool populate(const QString& root, const QString& sessionId, const DatabaseDocument& document,
++bool populate(const QString& root, const DatabaseDocument& document,
+         RuntimeCatalog* catalog, QString* error) {
+     const auto tracks = readTrackIndex(document);
+     const auto playlists = readPlaylistIndex(document);
+@@ -199,7 +199,8 @@
+         track.resolvedAudioPath = resolveTrackPath(root, track.audioRelativePath, &track);
+         track.resolvedAnlzPath = resolveTrackPath(root, track.anlzRelativePath, &track);
+         track.resolvedArtworkPath = resolveTrackPath(root, track.artworkRelativePath, &track);
+-        applyAnlz(root, sessionId, &track);
++        // Keep initial browsing metadata-only, regardless of the USB's track
++        // count. ANLZ files are inspected only when this track is loaded.
+         if (!catalog->insertTrack(std::move(track))) {
+             catalog->appendDiagnostic(QStringLiteral("Track %1 omitted: catalog identity/path conflict").arg(source.id));
+         }
+@@ -292,10 +293,13 @@
+ }
+ 
+ QString RekordboxUsbSession::writePerformance(const PerformanceEdit& edit) {
++    const std::lock_guard<std::mutex> analysisLock(m_analysisMutex);
+     const std::lock_guard<std::mutex> lock(m_mutex);
+     if (m_state != UsbSessionState::Ready || !m_catalog || !m_sessionState->isActive()) return "USB session is unavailable.";
+     auto track = m_catalog->findTrack(edit.trackId);
+     if (!track) return "Unknown USB track.";
++    if (track->analysisState == RuntimeAnalysisState::Unknown)
++        return "Load the USB track before saving its performance data.";
+     const auto error = writeUsbPerformance(m_snapshot, &*track, edit, m_sessionState);
+     if (error.isEmpty()) {
+         for (auto& waveform : track->waveforms) waveform.sessionId = m_sessionId;
+@@ -385,7 +389,7 @@
+     }
+     auto catalog = std::make_shared<RuntimeCatalog>();
+     QString error;
+-    if (!populate(root, m_sessionId, document, catalog.get(), &error)) {
++    if (!populate(root, document, catalog.get(), &error)) {
+         return fail(UsbSessionState::Error, UsbSessionError::CorruptExport, error);
+     }
+     const auto extended = resolvePath(root, QDir(root).relativeFilePath(
+@@ -409,6 +413,39 @@
+     m_extendedDatabasePath = extended;
+     m_state = UsbSessionState::Ready;
+     return true;
++}
++
++std::optional<RuntimeTrack> RekordboxUsbSession::loadTrackAnalysis(
++        quint32 rekordboxId, QString* error) {
++    if (error) error->clear();
++    const auto fail = [error](const QString& message) -> std::optional<RuntimeTrack> {
++        if (error) *error = message;
++        return std::nullopt;
++    };
++    const std::lock_guard<std::mutex> analysisLock(m_analysisMutex);
++    if (!refresh()) return fail(QStringLiteral("Rekordbox USB source changed or disappeared"));
++    std::optional<RuntimeTrack> track;
++    std::shared_ptr<RuntimeCatalog> catalog;
++    QString root;
++    {
++        const std::lock_guard<std::mutex> lock(m_mutex);
++        if (m_state != UsbSessionState::Ready || !m_catalog || !m_sessionState->isActive())
++            return fail(QStringLiteral("Rekordbox USB session is not ready"));
++        catalog = m_catalog;
++        track = catalog->findTrack(rekordboxId);
++        root = m_root;
++    }
++    if (!track) return fail(QStringLiteral("Unknown Rekordbox track identifier"));
++    if (track->analysisState != RuntimeAnalysisState::Unknown) return track;
++
++    applyAnlz(root, m_sessionId, &*track);
++    if (!refresh()) return fail(QStringLiteral("USB source changed during analysis inspection"));
++    const std::lock_guard<std::mutex> lock(m_mutex);
++    if (m_state != UsbSessionState::Ready || m_catalog != catalog ||
++            !m_sessionState->isActive() || !catalog->publishAnalysis(*track))
++        return fail(QStringLiteral("USB session invalidated during analysis inspection"));
++    // Take fresh PDB metadata too: a rating write may have completed during I/O.
++    return catalog->findTrack(rekordboxId);
+ }
+ 
+ bool RekordboxUsbSession::refresh() {
+@@ -595,16 +632,10 @@
+     if (error) {
+         error->clear();
+     }
+-    // A path alone is not an identity. Revalidate the PDB fingerprint before
+-    // every projection so a different volume mounted at the same path cannot
+-    // inherit the old session's authority.
+-    if (!refresh()) {
+-        if (error) {
+-            *error = QStringLiteral("Rekordbox USB source changed or disappeared");
+-        }
+-        return {};
+-    }
+-    std::optional<RuntimeTrack> runtimeTrack;
++    // This is the first analysis I/O for the selected track. The loader also
++    // revalidates the PDB identity before reusing any cached analysis.
++    const auto runtimeTrack = loadTrackAnalysis(rekordboxId, error);
++    if (!runtimeTrack) return {};
+     std::shared_ptr<const SessionState> sessionState;
+     {
+         const std::lock_guard<std::mutex> lock(m_mutex);
+@@ -615,14 +646,7 @@
+             }
+             return {};
+         }
+-        runtimeTrack = m_catalog->findTrack(rekordboxId);
+         sessionState = m_sessionState;
+-    }
+-    if (!runtimeTrack) {
+-        if (error) {
+-            *error = QStringLiteral("Unknown Rekordbox track identifier");
+-        }
+-        return {};
+     }
+     // Load each native style and preview on demand; mounting stays descriptor-only.
+     const auto waveformPriority = [](const RuntimeWaveform& waveform) {
+diff --git a/src/library/rekordbox/rekordboxusbsession.h b/src/library/rekordbox/rekordboxusbsession.h
+--- a/src/library/rekordbox/rekordboxusbsession.h
++++ b/src/library/rekordbox/rekordboxusbsession.h
+@@ -29,9 +29,15 @@
+     RekordboxUsbSession& operator=(const RekordboxUsbSession&) = delete;
+ 
+     // Synchronous, potentially expensive: call off the UI/audio thread. Only a
+-    // fully built/sealed catalog is published. invalidate() may cancel a load.
++    // sealed PDB metadata catalog is published; no ANLZ file is opened here.
++    // invalidate() may cancel a load.
+     bool load();
+     bool refresh();
++    // Explicit per-track inspection, on demand when projecting a track for
++    // deck/headphone loading. Reuses session-local analysis; never scans other
++    // tracks. Potentially expensive synchronous I/O, never on the audio thread.
++    std::optional<RuntimeTrack> loadTrackAnalysis(
++            quint32 rekordboxId, QString* error = nullptr);
+     // Explicit USB write, off GUI/audio threads; returns an error or empty.
+     QString writeList(const QString& name, const QList<quint32>& ids, bool history = false);
+     QString writePerformance(const PerformanceEdit& edit);
+@@ -59,6 +65,9 @@
+ 
+   private:
+     void invalidateLocked();
++    // Serializes lazy publication with performance writes. File I/O does not
++    // hold m_mutex, so invalidation can still revoke an in-flight inspection.
++    std::mutex m_analysisMutex;
+     mutable std::mutex m_mutex;
+     QString m_root;
+     const std::shared_ptr<SessionState> m_sessionState;
+diff --git a/src/test/rekordboxusbsession_test.cpp b/src/test/rekordboxusbsession_test.cpp
+--- a/src/test/rekordboxusbsession_test.cpp
++++ b/src/test/rekordboxusbsession_test.cpp
+@@ -34,6 +34,7 @@
+ #include "test/soundsourceproviderregistration.h"
+ #include "track/track.h"
+ #include "util/samplebuffer.h"
++#include "widget/wtracktableview.h"
+ 
+ namespace {
+ using namespace mixxx::rekordbox;
+@@ -270,15 +271,15 @@
+     EXPECT_EQ(song->colorId, 3u);
+     EXPECT_EQ(song->audioRelativePath, "/Contents/test.mp3");
+     EXPECT_EQ(song->resolvedAudioPath, volume.filePath("Contents/test.mp3"));
+-    // Phase 3 inspects the declared analysis path. This synthetic PDB has no
+-    // existing ANLZ file, so inspection is complete and the result is Missing.
+-    EXPECT_EQ(song->analysisState, RuntimeAnalysisState::Missing);
++    // Initial browsing publishes PDB metadata without inspecting ANLZ.
++    EXPECT_EQ(song->analysisState, RuntimeAnalysisState::Unknown);
+     EXPECT_TRUE(song->beats.isEmpty());
+     EXPECT_TRUE(song->cues.isEmpty());
+     EXPECT_TRUE(song->waveforms.isEmpty());
+     QString projectionError;
+     const auto projected = session.createTemporaryTrack(1, &projectionError);
+     ASSERT_TRUE(projected) << projectionError.toStdString();
++    EXPECT_EQ(catalog->findTrack(1)->analysisState, RuntimeAnalysisState::Missing);
+     EXPECT_FALSE(projected->getId().isValid());
+     EXPECT_EQ(projected->getTitle(), QStringLiteral("Title"));
+     EXPECT_EQ(projected->getComment(), QStringLiteral("Comment"));
+@@ -305,6 +306,20 @@
+ 
+ class RekordboxRuntimeTrackModelTest : public LibraryTest {};
+ 
++// No Library backend is needed for the metadata-only selection/tick boundary.
++class MetadataOnlyUsbTable : public WTrackTableView {
++  public:
++    explicit MetadataOnlyUsbTable(UserSettingsPointer config)
++            : WTrackTableView(nullptr, config, nullptr, 0.0) {}
++  protected:
++    void selectionChanged(const QItemSelection& selected, const QItemSelection& deselected) override {
++        QTableView::selectionChanged(selected, deselected);
++    }
++    void currentChanged(const QModelIndex& current, const QModelIndex& previous) override {
++        QTableView::currentChanged(current, previous);
++    }
++};
++
+ TEST_F(RekordboxRuntimeTrackModelTest,
+         ExposesProviderRowsWithoutTrackIdsImportOrPathDrag) {
+     QTemporaryDir volume;
+@@ -347,6 +362,167 @@
+     EXPECT_FALSE(model.getTrack(model.index(0, 0)));
+ }
+ 
++TEST_F(RekordboxRuntimeTrackModelTest, ThousandTracksBrowseWithoutInspectingAnalysis) {
++    QTemporaryDir volume;
++    Rows data;
++    for (int id = 1; id <= 1000; ++id) {
++        const auto owner = QStringLiteral("/Contents/%1.mp3").arg(id);
++        const auto analysis = QStringLiteral("/PIONEER/USBANLZ/%1.DAT").arg(id);
++        data.append({0, track(id, owner.toUtf8(), analysis.toUtf8())});
++        ASSERT_TRUE(write(volume.path() + analysis, syntheticCueAnlz(owner)));
++    }
++    data.append({7, playlist(12, 0, false)});
++    data.append({8, entry(12, 500, 1)});
++    data.append({8, entry(12, 1000, 2)});
++    ASSERT_TRUE(write(pdb(volume), database(data)));
++    ASSERT_TRUE(write(volume.filePath("Contents/500.mp3"), "audio fixture"));
++    auto session = std::make_shared<RekordboxUsbSession>(volume.path());
++    QElapsedTimer timer; timer.start();
++    ASSERT_TRUE(session->load()) << session->error().toStdString();
++    RecordProperty("metadata_load_ms", timer.elapsed());
++    const auto catalog = session->catalog();
++    ASSERT_EQ(1000, catalog->tracks().size());
++    for (const auto& metadata : catalog->tracks()) {
++        EXPECT_EQ(RuntimeAnalysisState::Unknown, metadata.analysisState);
++        EXPECT_TRUE(metadata.cues.isEmpty());
++        EXPECT_TRUE(metadata.beats.isEmpty());
++        EXPECT_TRUE(metadata.analysisFingerprints.isEmpty());
++    }
++    ASSERT_TRUE(catalog->findPlaylist(12));
++    EXPECT_EQ((QList<quint32>{500, 1000}), catalog->findPlaylist(12)->trackIds);
++    RekordboxRuntimeTrackModel model(nullptr, trackCollectionManager());
++    model.showAllTracks(session);
++    EXPECT_EQ(1000, model.rowCount());
++    for (int row = 0; row < 12; ++row) {
++        model.requestWaveformPreview(model.index(row, 0), WaveformMode::ThreeBand);
++        EXPECT_EQ(nullptr, model.waveformPreview(model.index(row, 0), WaveformMode::ThreeBand));
++    }
++    model.showPlaylist(session, catalog->findPlaylist(12)->trackIds, 12);
++    EXPECT_EQ(2, model.rowCount());
++    ProxyTrackModel proxy(&model);
++    MetadataOnlyUsbTable table(config());
++    table.QTableView::setModel(&proxy);
++    table.show();
++    table.selectRow(0);
++    int metadataSelections = 0;
++    QObject::connect(&table, &WTrackTableView::trackSelected, &table,
++            [&](TrackPointer selected) { EXPECT_FALSE(selected); ++metadataSelections; });
++    ASSERT_TRUE(QMetaObject::invokeMethod(&table, "slotScrollValueChanged", Qt::DirectConnection, Q_ARG(int, 0)));
++    QThread::msleep(120);
++    ASSERT_TRUE(QMetaObject::invokeMethod(&table, "slotGuiTick50ms", Qt::DirectConnection, Q_ARG(double, 0.05)));
++    EXPECT_EQ(1, metadataSelections);
++    QCoreApplication::processEvents();
++    for (const auto& metadata : catalog->tracks())
++        EXPECT_EQ(RuntimeAnalysisState::Unknown, metadata.analysisState);
++
++    // Projection is the first analysis read, and is confined to this one track.
++    const auto projected = model.getTrack(model.index(0, 0));
++    ASSERT_TRUE(projected);
++    EXPECT_EQ(500u, projected->getSourceBinding().rekordboxId());
++    EXPECT_EQ(Track::ImportStatus::Pending, projected->getCueImportStatus());
++    const auto selected = catalog->findTrack(500);
++    ASSERT_TRUE(selected);
++    EXPECT_EQ(RuntimeAnalysisState::Ready, selected->analysisState);
++    EXPECT_EQ(4, selected->cues.size());
++    int inspected = 0;
++    for (const auto& metadata : catalog->tracks())
++        if (metadata.analysisState != RuntimeAnalysisState::Unknown) ++inspected;
++    EXPECT_EQ(1, inspected);
++    EXPECT_TRUE(session->createTemporaryTrack(500));
++    EXPECT_EQ(4, catalog->findTrack(500)->cues.size());
++    EXPECT_EQ(RuntimeAnalysisState::Unknown, catalog->findTrack(1000)->analysisState);
++}
++
++TEST(RekordboxUsbSessionTest, DeferredAnalysisReadsAtFirstLoadAndKeepsMetadataUpdates) {
++    QTemporaryDir volume;
++    ASSERT_TRUE(write(pdb(volume), database(rows())));
++    const auto path = volume.filePath("PIONEER/USBANLZ/test.DAT");
++    ASSERT_TRUE(write(path, "not yet a valid analysis file"));
++    RekordboxUsbSession session(volume.path());
++    ASSERT_TRUE(session.load());
++    EXPECT_EQ(RuntimeAnalysisState::Unknown, session.catalog()->findTrack(1)->analysisState);
++    ASSERT_TRUE(write(path, syntheticCueAnlz("/Contents/test.mp3")));
++    ASSERT_TRUE(session.writeRating(1, 2).isEmpty());
++    const auto inspected = session.loadTrackAnalysis(1);
++    ASSERT_TRUE(inspected);
++    EXPECT_EQ(RuntimeAnalysisState::Ready, inspected->analysisState);
++    EXPECT_EQ(4, inspected->cues.size());
++    EXPECT_EQ(2u, inspected->rating);
++    EXPECT_EQ(2, inspected->rawMetadata.value("rating").toInt());
++    const auto cached = session.loadTrackAnalysis(1);
++    ASSERT_TRUE(cached);
++    EXPECT_EQ(inspected->analysisFingerprints, cached->analysisFingerprints);
++    EXPECT_EQ(inspected->diagnostics, cached->diagnostics);
++    EXPECT_EQ(4, cached->cues.size());
++    EXPECT_FALSE(session.loadTrackAnalysis(999));
++}
++
++TEST(RekordboxUsbSessionTest, DeferredAnalysisPreservesOwnershipAndFingerprintGuards) {
++    QTemporaryDir volume;
++    ASSERT_TRUE(write(pdb(volume), database(rows())));
++    const auto path = volume.filePath("PIONEER/USBANLZ/test.DAT");
++    auto analysis = syntheticCueAnlz("/Contents/test.mp3");
++    QByteArray waveform(20, '\0');
++    waveform.replace(0, 4, "PWAV");
++    putAnlz32(&waveform, 4, 20); putAnlz32(&waveform, 8, 24); putAnlz32(&waveform, 12, 4);
++    const QByteArray payload("\x11\x22\x33\x44", 4);
++    waveform += payload; analysis += waveform; putAnlz32(&analysis, 8, analysis.size());
++    ASSERT_TRUE(write(path, analysis));
++    RekordboxUsbSession session(volume.path()); ASSERT_TRUE(session.load());
++    PerformanceEdit premature; premature.trackId = 1;
++    premature.binding = mixxx::SourceBinding::rekordboxUsb(1, session.sessionState());
++    EXPECT_FALSE(session.writePerformance(premature).isEmpty());
++    EXPECT_FALSE(QFile::exists(path + ".nauticmixxx-performance-backup"));
++    const auto inspected = session.loadTrackAnalysis(1);
++    ASSERT_TRUE(inspected); ASSERT_EQ(1, inspected->waveforms.size());
++    const auto descriptor = inspected->waveforms.first();
++    const auto loaded = session.loadWaveformPayload(descriptor);
++    ASSERT_TRUE(loaded); EXPECT_EQ(payload, *loaded);
++    const auto modified = QFileInfo(path).lastModified();
++    auto changed = analysis; changed[changed.size() - 1] = char(0x55);
++    ASSERT_TRUE(write(path, changed));
++    QFile timestamps(path); ASSERT_TRUE(timestamps.open(QIODevice::ReadWrite));
++    ASSERT_TRUE(timestamps.setFileTime(modified, QFileDevice::FileModificationTime)); timestamps.close();
++    EXPECT_FALSE(session.loadWaveformPayload(descriptor));
++
++    // An analysis file belonging to another audio path cannot supply cues.
++    ASSERT_TRUE(write(path, syntheticCueAnlz("/Contents/different.mp3")));
++    RekordboxUsbSession wrongOwner(volume.path()); ASSERT_TRUE(wrongOwner.load());
++    const auto rejected = wrongOwner.loadTrackAnalysis(1); ASSERT_TRUE(rejected);
++    EXPECT_EQ(RuntimeAnalysisState::Missing, rejected->analysisState);
++    EXPECT_TRUE(rejected->cues.isEmpty()); EXPECT_TRUE(rejected->waveforms.isEmpty());
++
++    // Replacing the PDB before the first deferred read revokes the session.
++    RekordboxUsbSession replaced(volume.path()); ASSERT_TRUE(replaced.load());
++    ASSERT_TRUE(write(pdb(volume), database({{0, track(2)}})));
++    EXPECT_FALSE(replaced.loadTrackAnalysis(1));
++    EXPECT_EQ(UsbSessionState::Invalidated, replaced.state());
++}
++
++TEST(RekordboxUsbSessionTest, ConcurrentDeferredInspectionIsCoherentAndInvalidationIsTerminal) {
++    QTemporaryDir volume;
++    ASSERT_TRUE(write(pdb(volume), database(rows())));
++    ASSERT_TRUE(write(volume.filePath("PIONEER/USBANLZ/test.DAT"), syntheticCueAnlz("/Contents/test.mp3")));
++    RekordboxUsbSession session(volume.path());
++    ASSERT_TRUE(session.load());
++    std::optional<RuntimeTrack> first, second;
++    std::atomic<bool> start{false};
++    std::thread worker1([&] { while (!start.load()) std::this_thread::yield(); first = session.loadTrackAnalysis(1); });
++    std::thread worker2([&] { while (!start.load()) std::this_thread::yield(); second = session.loadTrackAnalysis(1); });
++    start.store(true);
++    worker1.join(); worker2.join();
++    ASSERT_TRUE(first); ASSERT_TRUE(second);
++    EXPECT_EQ(4, first->cues.size()); EXPECT_EQ(4, second->cues.size());
++    EXPECT_EQ(first->analysisFingerprints, second->analysisFingerprints);
++    EXPECT_EQ(first->diagnostics, second->diagnostics);
++    const auto catalog = session.catalog();
++    session.invalidate();
++    EXPECT_FALSE(session.loadTrackAnalysis(1));
++    EXPECT_FALSE(session.createTemporaryTrack(1));
++    EXPECT_FALSE(catalog->valid()); EXPECT_TRUE(catalog->tracks().isEmpty());
++    EXPECT_EQ(UsbSessionState::Invalidated, session.state());
++}
++
+ TEST_F(RekordboxRuntimeTrackModelTest, BrowserPreviewCacheSeparatesStylesAndClearsWithSession) {
+     QTemporaryDir volume;
+     ASSERT_TRUE(write(pdb(volume), database(rows())));
+@@ -366,10 +542,14 @@
+     ASSERT_TRUE(write(volume.filePath("PIONEER/USBANLZ/test.DAT"),analysis));
+     auto session = std::make_shared<RekordboxUsbSession>(volume.path());
+     ASSERT_TRUE(session->load());
+-    ASSERT_EQ(2,session->catalog()->findTrack(1)->waveforms.size());
+     RekordboxRuntimeTrackModel model(nullptr,trackCollectionManager());
+     model.showAllTracks(session);
+     const auto index = model.index(0,0);
++    model.requestWaveformPreview(index, WaveformMode::ThreeBand);
++    EXPECT_EQ(RuntimeAnalysisState::Unknown, session->catalog()->findTrack(1)->analysisState);
++    const auto inspected = session->loadTrackAnalysis(1);
++    ASSERT_TRUE(inspected);
++    ASSERT_EQ(2, inspected->waveforms.size());
+     for (auto mode : {WaveformMode::ThreeBand,WaveformMode::RGB,WaveformMode::Blue}) {
+         EXPECT_EQ(nullptr,model.waveformPreview(index,mode));
+         model.requestWaveformPreview(index,mode);
+@@ -788,7 +968,10 @@
+     const auto catalog = session.catalog();
+     ASSERT_FALSE(catalog->tracks().isEmpty());
+     QSet<QString> audioPaths;
+-    for (const auto& track : catalog->tracks()) {
++    for (const auto& metadata : catalog->tracks()) {
++        const auto inspected = session.loadTrackAnalysis(metadata.rekordboxId);
++        ASSERT_TRUE(inspected);
++        const auto& track = *inspected;
+         EXPECT_FALSE(track.resolvedAnlzPath.isEmpty());
+         EXPECT_NE(track.analysisState, RuntimeAnalysisState::Unknown);
+         EXPECT_NE(track.analysisState, RuntimeAnalysisState::Invalid);
+@@ -822,8 +1005,10 @@
+     ASSERT_TRUE(session.load()) << session.error().toStdString();
+ 
+     std::optional<RuntimeWaveform> selected;
+-    for (const auto& track : session.catalog()->tracks()) {
+-        for (const auto& waveform : track.waveforms) {
++    for (const auto& metadata : session.catalog()->tracks()) {
++        const auto inspected = session.loadTrackAnalysis(metadata.rekordboxId);
++        ASSERT_TRUE(inspected);
++        for (const auto& waveform : inspected->waveforms) {
+             if (waveform.sectionTag == "PWV4" ||
+                     waveform.sectionTag == "PWAV" ||
+                     waveform.sectionTag == "PWV2" ||
+@@ -1061,7 +1246,7 @@
+ 
+     RekordboxUsbSession session(volume.path());
+     ASSERT_TRUE(session.load()) << session.error().toStdString();
+-    const auto runtimeTrack = session.catalog()->findTrack(1);
++    const auto runtimeTrack = session.loadTrackAnalysis(1);
+     ASSERT_TRUE(runtimeTrack);
+     ASSERT_TRUE(runtimeTrack->bpm);
+     EXPECT_DOUBLE_EQ(*runtimeTrack->bpm, 128.5);
+@@ -1124,7 +1309,7 @@
+         ASSERT_TRUE(QDir().mkpath(volume.filePath("Contents")));
+         ASSERT_TRUE(QFile::copy(getTestDir().filePath("sine-30.wav"),volume.filePath("Contents/test.wav")));
+         RekordboxUsbSession session(volume.path());ASSERT_TRUE(session.load());
+-        const auto runtime=session.catalog()->findTrack(1);ASSERT_TRUE(runtime);ASSERT_EQ(300,runtime->beats.size());
++        const auto runtime=session.loadTrackAnalysis(1);ASSERT_TRUE(runtime);ASSERT_EQ(300,runtime->beats.size());
+         const auto projected=session.createTemporaryTrack(1);ASSERT_TRUE(projected);
+         SoundSourceProxy proxy(projected);const auto audio=proxy.openAudioSource();ASSERT_TRUE(audio);
+         const auto beats=projected->getBeats();ASSERT_TRUE(beats);
+@@ -1166,7 +1351,7 @@
+ 
+     RekordboxUsbSession session(volume.path());
+     ASSERT_TRUE(session.load()) << session.error().toStdString();
+-    const auto runtimeTrack = session.catalog()->findTrack(1);
++    const auto runtimeTrack = session.loadTrackAnalysis(1);
+     ASSERT_TRUE(runtimeTrack);
+     ASSERT_EQ(runtimeTrack->cues.size(), 4);
+     EXPECT_EQ(runtimeTrack->cues[0].hotcueIndex, 1); // PCO2, not PCOB slot 2.
+@@ -1293,7 +1478,10 @@
+     RekordboxUsbSession session(root);
+     ASSERT_TRUE(session.load()) << session.error().toStdString();
+     std::optional<RuntimeTrack> selected;
+-    for (const auto& track : session.catalog()->tracks()) {
++    for (const auto& metadata : session.catalog()->tracks()) {
++        const auto inspected = session.loadTrackAnalysis(metadata.rekordboxId);
++        ASSERT_TRUE(inspected);
++        const auto& track = *inspected;
+         const bool hasHotCue = std::any_of(track.cues.cbegin(),
+                 track.cues.cend(),
+                 [](const RuntimeCue& cue) {
+@@ -1372,7 +1560,7 @@
+     ASSERT_TRUE(write(volume.filePath("PIONEER/USBANLZ/test.EXT"), QByteArray("PMAI", 4)));
+     RekordboxUsbSession session(volume.path());
+     ASSERT_TRUE(session.load());
+-    const auto song = session.catalog()->findTrack(1);
++    const auto song = session.loadTrackAnalysis(1);
+     ASSERT_TRUE(song);
+     EXPECT_EQ(song->title, "Title");
+     EXPECT_TRUE(song->beats.isEmpty());
+@@ -1413,7 +1601,7 @@
+         }
+         RekordboxUsbSession session(volume.path());
+         ASSERT_TRUE(session.load());
+-        const auto song = session.catalog()->findTrack(1);
++        const auto song = session.loadTrackAnalysis(1);
+         ASSERT_TRUE(song);
+         EXPECT_EQ(song->title, "Title");
+         EXPECT_EQ(song->bpm, 128.5); // PDB BPM differs from the actual 128.00 grid.
+@@ -1447,7 +1635,7 @@
+         ASSERT_TRUE(write(volume.filePath("PIONEER/USBANLZ/test.EXT"), sibling));
+         RekordboxUsbSession session(volume.path());
+         ASSERT_TRUE(session.load());
+-        const auto song = session.catalog()->findTrack(1);
++        const auto song = session.loadTrackAnalysis(1);
+         ASSERT_TRUE(song);
+         EXPECT_EQ(song->analysisState, RuntimeAnalysisState::Partial);
+         EXPECT_EQ(song->beats.size(), 368);
+@@ -1485,13 +1673,13 @@
+     }
+ 
+     RuntimeWaveform first() {
+-        return session->catalog()->findTrack(1)->waveforms.first();
++        return session->loadTrackAnalysis(1)->waveforms.first();
+     }
+ };
+ 
+-TEST_F(RekordboxLazyWaveformTest, MountRetainsOnlyDescriptorsAndCorrectOffsets) {
++TEST_F(RekordboxLazyWaveformTest, TrackInspectionRetainsOnlyDescriptorsAndCorrectOffsets) {
+     ASSERT_TRUE(session->load());
+-    const auto song = session->catalog()->findTrack(1);
++    const auto song = session->loadTrackAnalysis(1);
+     ASSERT_TRUE(song);
+     const auto inlineRead = readAnlz(original);
+     ASSERT_EQ(song->waveforms.size(), inlineRead.waveforms.size());
+@@ -1596,7 +1784,7 @@
+     RekordboxUsbSession other(volume.path());
+     ASSERT_TRUE(other.load());
+     EXPECT_FALSE(other.loadWaveformPayload(descriptor));
+-    EXPECT_TRUE(other.loadWaveformPayload(other.catalog()->findTrack(1)->waveforms.first()));
++    EXPECT_TRUE(other.loadWaveformPayload(other.loadTrackAnalysis(1)->waveforms.first()));
+ }
+ 
+ TEST_F(RekordboxLazyWaveformTest, EmptyPayloadIsSuccessNotFailure) {
+@@ -1626,7 +1814,7 @@
+     changed.replace(waveform.sectionOffset, 4, "PWVX");
+     ASSERT_TRUE(write(analysisPath, changed));
+     ASSERT_TRUE(session->load());
+-    const auto song = session->catalog()->findTrack(1);
++    const auto song = session->loadTrackAnalysis(1);
+     ASSERT_TRUE(song);
+     EXPECT_EQ(song->analysisState, RuntimeAnalysisState::Partial);
+     bool found = false;
+@@ -1721,7 +1909,7 @@
+     ASSERT_TRUE(QDir().mkpath(volume.filePath("Contents")));
+     ASSERT_TRUE(write(volume.filePath("Contents/test.mp3"), "fake audio"));
+     RekordboxUsbSession session(volume.path()); ASSERT_TRUE(session.load());
+-    const auto catalogTrack = session.catalog()->findTrack(1); ASSERT_TRUE(catalogTrack);
++    const auto catalogTrack = session.loadTrackAnalysis(1); ASSERT_TRUE(catalogTrack);
+     PerformanceEdit edit; edit.trackId = 1; edit.binding = mixxx::SourceBinding::rekordboxUsb(1, session.sessionState());
+     edit.cues = catalogTrack->cues; edit.cues[0].startMs = 1600; edit.cues[0].label = "Changed";
+     edit.cues[3].activeLoop = true; edit.beats = {{100,1,12000},{600,2,12000},{1100,3,12000}};
+@@ -1731,7 +1919,7 @@
+     QFile savedDatabase(pdb(volume)); ASSERT_TRUE(savedDatabase.open(QIODevice::ReadOnly));
+     EXPECT_EQ(originalPdb, savedDatabase.readAll()); EXPECT_TRUE(QFile::exists(analysisPath + ".nauticmixxx-performance-backup"));
+     RekordboxUsbSession reconnected(volume.path()); ASSERT_TRUE(reconnected.load());
+-    const auto saved = reconnected.catalog()->findTrack(1); ASSERT_TRUE(saved); ASSERT_EQ(4, saved->cues.size());
++    const auto saved = reconnected.loadTrackAnalysis(1); ASSERT_TRUE(saved); ASSERT_EQ(4, saved->cues.size());
+     EXPECT_EQ(1600, *saved->cues[0].startMs); EXPECT_EQ("Changed", saved->cues[0].label);
+     EXPECT_TRUE(saved->cues[3].activeLoop); ASSERT_EQ(3, saved->beats.size()); EXPECT_EQ(100, saved->beats[0].timeMs);
+     QFile savedAnalysis(analysisPath); ASSERT_TRUE(savedAnalysis.open(QIODevice::ReadOnly));
+diff --git a/src/widget/wtracktableview.cpp b/src/widget/wtracktableview.cpp
+--- a/src/widget/wtracktableview.cpp
++++ b/src/widget/wtracktableview.cpp
+@@ -402,7 +402,14 @@
+             if (indices.size() == 1 && indices.first().isValid()) {
+                 // A single track has been selected
+                 TrackModel* pTrackModel = getTrackModel();
+-                if (pTrackModel) {
++                auto* sourceModel = model();
++                while (auto* proxy = qobject_cast<QAbstractProxyModel*>(sourceModel))
++                    sourceModel = proxy->sourceModel();
++                // USB projection imports analysis. Highlighting a row must
++                // remain metadata-only, including the deferred cover-art tick.
++                if (qobject_cast<mixxx::rekordbox::RekordboxRuntimeTrackModel*>(sourceModel)) {
++                    emit trackSelected(TrackPointer());
++                } else if (pTrackModel) {
+                     TrackPointer pTrack = pTrackModel->getTrack(indices.first());
+                     if (pTrack) {
+                         emit trackSelected(pTrack);

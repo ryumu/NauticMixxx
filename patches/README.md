@@ -551,3 +551,21 @@ occupied endpoints, to avoid counting one extra pixel with Linux font substituti
   button opens the existing browser again, so both directions work on screen.
 - Test empty/cleared selections, exact deck routing, live load protection,
   touch-release activation, cancellation and header layout at 1280/1920 widths.
+
+## 0049 — Read rekordbox analysis when a track is loaded
+
+- Publish the sealed PDB metadata/playlist catalog without opening every
+  track's DAT/EXT/2EX files. Analysis remains Unknown until explicit track
+  projection for a deck or headphone preview.
+- Inspect only the requested track, publish its validated analysis atomically,
+  and reuse it within the USB session. Keep PDB identity checks, ANLZ owner and
+  path validation, waveform fingerprints, and terminal session invalidation.
+- Scrolling, painting, and playlist changes do not start ANLZ inspection.
+  Browser waveform previews become available after the track has been loaded;
+  preview requests use the current session catalog instead of stale row data.
+- Serialize analysis publication with performance writes without holding the
+  session state mutex across analysis reads. Unloaded tracks cannot overwrite
+  performance data. Rating/playlist metadata remains usable before loading.
+- Cover a 1,000-track synthetic USB, metadata-only browsing, first-load cue
+  import, concurrent inspection, caching, rating preservation and invalidation.
+  Existing cue/grid/waveform/save checks now explicitly request analysis.
