@@ -79,6 +79,8 @@ The release includes corresponding source, a package manifest, signed update fee
 
 [Raspberry Pi 5 開発環境（日本語）](docs/RASPBERRY-PI-5-DEV-JA.md)
 
+[ryumu版の追加・変更内容（日本語）](docs/RYUMU-EDITION-JA.md)
+
 ---
 
 <sub>NauticMixxx is a community edition built on Mixxx 2.5.6. NauticMixxx components use GPL v3; the Mixxx engine retains GPL v2-or-later terms. [License](LICENSE.md) · [Third-party notices](THIRD_PARTY_NOTICES.md) · [Trademarks](TRADEMARKS.md). Independent from the hardware and software trademark owners named in those notices.</sub>
