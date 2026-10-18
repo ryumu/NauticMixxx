@@ -196,8 +196,7 @@
             <control>
                 <group>[EffectRack1_EffectUnit1]</group>
                 <key>PioneerDDJFLX4.beatFxLevelDepthRotate</key>
-                <description>BEAT FX LEVEL/DEPTH - rotate (MSB) - Adjust FX Level (mix) and BEAT FX Depth (meta) in the
-                    selected slot
+                <description>BEAT FX LEVEL/DEPTH - rotate (MSB) - Direct FX amount 0-100%, with or without SHIFT (native RX3); mix / SHIFT meta (stock Mixxx)
                 </description>
                 <status>0xB4</status>
                 <midino>0x02</midino>
@@ -1638,7 +1637,7 @@
             <control>
                 <group>[EffectRack1_EffectUnit1]</group>
                 <key>PioneerDDJFLX4.beatFxOnOffPressed</key>
-                <description>BEAT FX ON/OFF - press - Toggle FX in the selected Slot (when on CHAN1/1+2)</description>
+                <description>BEAT FX ON/OFF - press - Toggle displayed Beat FX unit (native RX3) / focused slot (stock Mixxx) (when on CHAN1/1+2)</description>
                 <status>0x94</status>
                 <midino>0x47</midino>
                 <options>
@@ -1648,7 +1647,7 @@
             <control>
                 <group>[EffectRack1_EffectUnit1]</group>
                 <key>PioneerDDJFLX4.beatFxOnOffPressed</key>
-                <description>BEAT FX ON/OFF - press - Toggle FX in the selected Slot (when on CHAN2)</description>
+                <description>BEAT FX ON/OFF - press - Toggle displayed Beat FX unit (native RX3) / focused slot (stock Mixxx) (when on CHAN2)</description>
                 <status>0x95</status>
                 <midino>0x47</midino>
                 <options>
@@ -1678,7 +1677,7 @@
             <control>
                 <group>[EffectRack1_EffectUnit1]</group>
                 <key>PioneerDDJFLX4.beatFxLeftPressed</key>
-                <description>BEAT LEFT - press - select previous effect unit</description>
+                <description>BEAT LEFT - press - step X-PAD left (native RX3) / previous slot (stock Mixxx)</description>
                 <status>0x94</status>
                 <midino>0x4A</midino>
                 <options>
@@ -1688,7 +1687,7 @@
             <control>
                 <group>[EffectRack1_EffectUnit1]</group>
                 <key>PioneerDDJFLX4.beatFxRightPressed</key>
-                <description>BEAT RIGHT - press - select next effect unit</description>
+                <description>BEAT RIGHT - press - step X-PAD right (native RX3) / next slot (stock Mixxx)</description>
                 <status>0x94</status>
                 <midino>0x4B</midino>
                 <options>

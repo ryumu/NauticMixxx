@@ -67,7 +67,7 @@ try {
     }
     $source = Join-Path $WorkRoot 'mixxx-2.5.6'
     $patches = @(Get-ChildItem (Join-Path $projectRoot 'patches\00[0-9][0-9]-*.patch') | Sort-Object Name)
-    if ($patches.Count -ne 49) { throw 'One or more of the forty-nine NauticMixxx patches is missing.' }
+    if ($patches.Count -ne 50) { throw 'One or more of the fifty NauticMixxx patches is missing.' }
     $patchState = ($patches | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash }) -join ','
     if (-not (Test-Path $source)) {
         Invoke-Checked -File tar -Arguments @('-xzf', $sourceArchive, '-C', $WorkRoot)

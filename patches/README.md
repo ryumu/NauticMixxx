@@ -569,3 +569,14 @@ occupied endpoints, to avoid counting one extra pixel with Linux font substituti
 - Cover a 1,000-track synthetic USB, metadata-only browsing, first-load cue
   import, concurrent inspection, caching, rating preservation and invalidation.
   Existing cue/grid/waveform/save checks now explicitly request analysis.
+
+
+## 0050 — FLX4 Beat FX integration
+
+- Expose native effect and X-PAD step controls for FLX4, using the same selection
+  and parameter methods as the on-screen Beat FX tools.
+- Keep hardware FX selection in the supported native effect list, with audio
+  disabled after selection and momentary X-PAD activation released.
+- Test first selection, wraparound, repeated steps and passive beat adjustment.
+  The FLX4 mapping separately tests the unit gate, hidden-slot cleanup, channel
+  routing, LED feedback and stock Mixxx fallback.

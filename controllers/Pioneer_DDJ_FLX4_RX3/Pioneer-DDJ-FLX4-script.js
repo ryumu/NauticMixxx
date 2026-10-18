@@ -20,6 +20,10 @@
 //      * BeatFX: Assigned Effect Unit 1
 //                v FX_SELECT Load next effect.
 //                SHIFT + v FX_SELECT Load previous effect.
+//                Native RX3: FX_SELECT selects the displayed Beat FX;
+//                BEAT LEFT/RIGHT steps its X-PAD value; ON/OFF gates the unit.
+//                LEVEL/DEPTH directly sets the amount, with or without SHIFT.
+//                Stock Mixxx:
 //                < LEFT Cycle effect focus leftward
 //                > RIGHT Cycle effect focus rightward
 //                ON/OFF toggles focused effect slot
@@ -230,6 +234,15 @@ PioneerDDJFLX4.toggleLight = function(midiIn, active) {
 
 PioneerDDJFLX4.init = function() {
     engine.setValue("[EffectRack1_EffectUnit1]", "show_focus", 1);
+    if (PioneerDDJFLX4.nativeBeatFx()) {
+        // A newly connected controller starts with Beat FX off, including any
+        // hidden slots restored from an earlier three-slot mapping session.
+        engine.setValue("[EffectRack1_EffectUnit1]", "enabled", 0);
+        engine.setValue("[RX3BeatFx]", "xpad_hold", 0);
+        for (let i = 1; i <= 3; ++i) {
+            engine.setValue("[EffectRack1_EffectUnit1_Effect" + i + "]", "enabled", 0);
+        }
+    }
 
     engine.makeConnection("[Channel1]", "vu_meter", PioneerDDJFLX4.vuMeterUpdate);
     engine.makeConnection("[Channel2]", "vu_meter", PioneerDDJFLX4.vuMeterUpdate);
@@ -242,7 +255,12 @@ PioneerDDJFLX4.init = function() {
     engine.softTakeover("[EffectRack1_EffectUnit1_Effect1]", "meta", true);
     engine.softTakeover("[EffectRack1_EffectUnit1_Effect2]", "meta", true);
     engine.softTakeover("[EffectRack1_EffectUnit1_Effect3]", "meta", true);
-    engine.softTakeover("[EffectRack1_EffectUnit1]", "mix", true);
+    if (PioneerDDJFLX4.nativeBeatFx()) {
+        // The physical knob is authoritative: no pickup of a saved/screen value.
+        engine.softTakeover("[RX3BeatFx]", "amount", false);
+    } else {
+        engine.softTakeover("[EffectRack1_EffectUnit1]", "mix", true);
+    }
 
     const samplerCount = 16;
     if (engine.getValue("[App]", "num_samplers") < samplerCount) {
@@ -265,10 +283,13 @@ PioneerDDJFLX4.init = function() {
     engine.makeConnection("[Channel1]", "loop_enabled", PioneerDDJFLX4.loopToggle);
     engine.makeConnection("[Channel2]", "loop_enabled", PioneerDDJFLX4.loopToggle);
 
-    for (i = 1; i <= 3; i++) {
+    for (let i = 1; i <= 3; i++) {
         engine.makeConnection("[EffectRack1_EffectUnit1_Effect" + i +"]", "enabled", PioneerDDJFLX4.toggleFxLight);
     }
     engine.makeConnection("[EffectRack1_EffectUnit1]", "focused_effect", PioneerDDJFLX4.toggleFxLight);
+    engine.makeConnection("[EffectRack1_EffectUnit1]", "enabled", PioneerDDJFLX4.toggleFxLight);
+    engine.makeConnection("[EffectRack1_EffectUnit1_Effect1]", "loaded", PioneerDDJFLX4.toggleFxLight);
+    PioneerDDJFLX4.toggleFxLight();
 
     PioneerDDJFLX4.keepAliveTimer = engine.beginTimer(200, PioneerDDJFLX4.sendKeepAlive);
 
@@ -310,19 +331,38 @@ PioneerDDJFLX4.vuMeterUpdate = function(value, group) {
 // Effects
 //
 
+PioneerDDJFLX4.nativeBeatFx = function() {
+    return engine.getValue("[RX3BeatFx]", "controller_api") > 0;
+};
+
+PioneerDDJFLX4.beatFxPulse = function(key, value) {
+    engine.setValue("[RX3BeatFx]", key, value);
+    engine.setValue("[RX3BeatFx]", key, 0);
+};
+
 PioneerDDJFLX4.toggleFxLight = function(_value, _group, _control) {
-    const enabled = engine.getValue(PioneerDDJFLX4.focusedFxGroup(), "enabled");
+    let enabled = engine.getValue(PioneerDDJFLX4.focusedFxGroup(), "enabled");
+    if (PioneerDDJFLX4.nativeBeatFx()) {
+        enabled = enabled && engine.getValue("[EffectRack1_EffectUnit1]", "enabled") &&
+                engine.getValue("[EffectRack1_EffectUnit1_Effect1]", "loaded");
+    }
 
     PioneerDDJFLX4.toggleLight(PioneerDDJFLX4.lights.beatFx, enabled);
     PioneerDDJFLX4.toggleLight(PioneerDDJFLX4.lights.shiftBeatFx, enabled);
 };
 
 PioneerDDJFLX4.focusedFxGroup = function() {
+    // The native panel always displays slot 1, regardless of legacy slot focus.
+    if (PioneerDDJFLX4.nativeBeatFx()) return "[EffectRack1_EffectUnit1_Effect1]";
     const focusedFx = engine.getValue("[EffectRack1_EffectUnit1]", "focused_effect");
     return "[EffectRack1_EffectUnit1_Effect" + focusedFx + "]";
 };
 
 PioneerDDJFLX4.beatFxLevelDepthRotate = function(_channel, _control, value) {
+    if (PioneerDDJFLX4.nativeBeatFx()) {
+        engine.setParameter("[RX3BeatFx]", "amount", value / 0x7F);
+        return;
+    }
     if (PioneerDDJFLX4.shiftButtonDown[0] || PioneerDDJFLX4.shiftButtonDown[1]) {
         engine.softTakeoverIgnoreNextValue("[EffectRack1_EffectUnit1]", "mix");
         engine.setParameter(PioneerDDJFLX4.focusedFxGroup(), "meta", value / 0x7F);
@@ -350,24 +390,40 @@ PioneerDDJFLX4.changeFocusedEffectBy = function(numberOfSteps) {
 
 PioneerDDJFLX4.beatFxSelectPressed = function(_channel, _control, value) {
     if (value === 0) { return; }
+    if (PioneerDDJFLX4.nativeBeatFx()) {
+        PioneerDDJFLX4.beatFxPulse("effect_step", 1);
+        return;
+    }
 
     engine.setValue(PioneerDDJFLX4.focusedFxGroup(), "next_effect", value);
 };
 
 PioneerDDJFLX4.beatFxSelectShiftPressed = function(_channel, _control, value) {
     if (value === 0) { return; }
+    if (PioneerDDJFLX4.nativeBeatFx()) {
+        PioneerDDJFLX4.beatFxPulse("effect_step", -1);
+        return;
+    }
 
     engine.setValue(PioneerDDJFLX4.focusedFxGroup(), "prev_effect", value);
 };
 
 PioneerDDJFLX4.beatFxLeftPressed = function(_channel, _control, value) {
     if (value === 0) { return; }
+    if (PioneerDDJFLX4.nativeBeatFx()) {
+        PioneerDDJFLX4.beatFxPulse("beat_step", -1);
+        return;
+    }
 
     PioneerDDJFLX4.changeFocusedEffectBy(-1);
 };
 
 PioneerDDJFLX4.beatFxRightPressed = function(_channel, _control, value) {
     if (value === 0) { return; }
+    if (PioneerDDJFLX4.nativeBeatFx()) {
+        PioneerDDJFLX4.beatFxPulse("beat_step", 1);
+        return;
+    }
 
     PioneerDDJFLX4.changeFocusedEffectBy(1);
 };
@@ -375,6 +431,22 @@ PioneerDDJFLX4.beatFxRightPressed = function(_channel, _control, value) {
 PioneerDDJFLX4.beatFxOnOffPressed = function(_channel, _control, value) {
     if (value === 0) { return; }
 
+    if (PioneerDDJFLX4.nativeBeatFx()) {
+        const unit = "[EffectRack1_EffectUnit1]";
+        const slot = PioneerDDJFLX4.focusedFxGroup();
+        const active = engine.getValue(unit, "enabled") && engine.getValue(slot, "enabled");
+        // Close the audio gate before clearing a pad hold or stale hidden slots.
+        engine.setValue(unit, "enabled", 0);
+        engine.setValue("[RX3BeatFx]", "xpad_hold", 0);
+        for (let i = 1; i <= 3; ++i) {
+            engine.setValue("[EffectRack1_EffectUnit1_Effect" + i + "]", "enabled", 0);
+        }
+        if (!active && engine.getValue(slot, "loaded")) {
+            engine.setValue(slot, "enabled", 1);
+            engine.setValue(unit, "enabled", 1);
+        }
+        return;
+    }
     const toggleEnabled = !engine.getValue(PioneerDDJFLX4.focusedFxGroup(), "enabled");
     engine.setValue(PioneerDDJFLX4.focusedFxGroup(), "enabled", toggleEnabled);
 };
@@ -382,6 +454,11 @@ PioneerDDJFLX4.beatFxOnOffPressed = function(_channel, _control, value) {
 PioneerDDJFLX4.beatFxOnOffShiftPressed = function(_channel, _control, value) {
     if (value === 0) { return; }
 
+    if (PioneerDDJFLX4.nativeBeatFx()) {
+        engine.setValue("[EffectRack1_EffectUnit1]", "enabled", 0);
+        engine.setValue("[RX3BeatFx]", "xpad_hold", 0);
+        engine.setParameter("[RX3BeatFx]", "amount", 0);
+    }
     engine.setParameter("[EffectRack1_EffectUnit1]", "mix", 0);
     engine.softTakeoverIgnoreNextValue("[EffectRack1_EffectUnit1]", "mix");
 
@@ -397,6 +474,8 @@ PioneerDDJFLX4.beatFxChannel1 = function(_channel, control, value, _status, grou
 
     if (value === 0x7f) { enableChannel = 1; }
 
+    // The FLX4 switch has CH1 / CH1+2 / CH2, with no MASTER position.
+    engine.setValue(group, "group_[Master]_enable", 0);
     engine.setValue(group, "group_[Channel1]_enable", enableChannel);
 };
 
@@ -405,6 +484,7 @@ PioneerDDJFLX4.beatFxChannel2 = function(_channel, control, value, _status, grou
 
     if (value === 0x7f) { enableChannel = 1; }
 
+    engine.setValue(group, "group_[Master]_enable", 0);
     engine.setValue(group, "group_[Channel2]_enable", enableChannel);
 };
 

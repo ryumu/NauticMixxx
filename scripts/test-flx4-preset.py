@@ -37,6 +37,13 @@ expected = {
     ("0x96", "0x7A"): ("[Library]", "NauticFLX4Browser.view"),
     ("0x96", "0x46"): ("[Channel1]", "LoadSelectedTrack"),
     ("0x96", "0x47"): ("[Channel2]", "LoadSelectedTrack"),
+    ("0xB4", "0x02"): ("[EffectRack1_EffectUnit1]", "PioneerDDJFLX4.beatFxLevelDepthRotate"),
+    ("0x94", "0x10"): ("[EffectRack1_EffectUnit1]", "PioneerDDJFLX4.beatFxChannel1"),
+    ("0x95", "0x11"): ("[EffectRack1_EffectUnit1]", "PioneerDDJFLX4.beatFxChannel2"),
+    ("0x94", "0x47"): ("[EffectRack1_EffectUnit1]", "PioneerDDJFLX4.beatFxOnOffPressed"),
+    ("0x95", "0x47"): ("[EffectRack1_EffectUnit1]", "PioneerDDJFLX4.beatFxOnOffPressed"),
+    ("0x94", "0x4A"): ("[EffectRack1_EffectUnit1]", "PioneerDDJFLX4.beatFxLeftPressed"),
+    ("0x94", "0x4B"): ("[EffectRack1_EffectUnit1]", "PioneerDDJFLX4.beatFxRightPressed"),
 }
 by_message = dict(zip(messages, controls))
 for message, (group, key) in expected.items():
