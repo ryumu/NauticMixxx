@@ -558,7 +558,7 @@ new file mode 100644
 +    checker.check();
 +    runEvents(50);
 +    EXPECT_EQ(1, server.requests);
-+    EXPECT_TRUE(server.lastRequest.contains("User-Agent: NauticMixxx/1.6.0"));
++    EXPECT_TRUE(server.lastRequest.toLower().contains("user-agent: nauticmixxx/1.6.0\r\n"));
 +    EXPECT_FALSE(server.lastRequest.toLower().contains("authorization:"));
 +}
 +
