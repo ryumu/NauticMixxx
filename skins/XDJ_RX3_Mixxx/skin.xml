@@ -71,12 +71,6 @@
 
 	<Children>
 		<SingletonDefinition>
-			<ObjectName>Topbar_Singleton</ObjectName>
-			<Children>
-				<Template src="skin:topbar.xml"/>
-			</Children>
-		</SingletonDefinition>
-		<SingletonDefinition>
 			<ObjectName>Overview_Singleton</ObjectName>
 			<Children>
 				<Template src="skin:overview.xml"/>
@@ -86,6 +80,13 @@
 			<ObjectName>Library_Singleton</ObjectName>
 			<Children>
 				<Template src="skin:library.xml"/>
+			</Children>
+		</SingletonDefinition>
+		<!-- Create native browser controls before the topbar binds [RX3Browser],open. -->
+		<SingletonDefinition>
+			<ObjectName>Topbar_Singleton</ObjectName>
+			<Children>
+				<Template src="skin:topbar.xml"/>
 			</Children>
 		</SingletonDefinition>
 		<SingletonDefinition>
