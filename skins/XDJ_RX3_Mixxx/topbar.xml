@@ -69,11 +69,11 @@
               <PushButton>
                 <ObjectName>RX3SmartFxStatus</ObjectName><Size>136f,28f</Size><NumberStates>2</NumberStates>
                 <LeftClickIsPushButton>true</LeftClickIsPushButton>
-                <Tooltip>Smart CFX status. Click to select a preset or turn Smart CFX on/off.</Tooltip>
+                <Tooltip>Tap to turn Smart CFX on or off</Tooltip>
                 <State><Number>0</Number><Text>SMART CFX  OFF</Text></State>
                 <State><Number>1</Number><Text>SMART CFX  ON</Text></State>
                 <Connection><ConfigKey>[RX3SmartFx],enabled</ConfigKey><ConnectValueFromWidget>false</ConnectValueFromWidget></Connection>
-                <Connection><ConfigKey>[RX3SmartFx],preset_open</ConfigKey><ConnectValueToWidget>false</ConnectValueToWidget><EmitOnPressAndRelease>true</EmitOnPressAndRelease></Connection>
+                <Connection><ConfigKey>[RX3SmartFx],toggle</ConfigKey><ConnectValueToWidget>false</ConnectValueToWidget><EmitOnPressAndRelease>true</EmitOnPressAndRelease></Connection>
               </PushButton>
               <PushButton>
                 <ObjectName>RX3SmartFxPreset</ObjectName><Size>158f,28f</Size><NumberStates>3</NumberStates>

@@ -2,15 +2,13 @@ diff --git a/src/widget/wrx3smartfx.h b/src/widget/wrx3smartfx.h
 new file mode 100644
 --- /dev/null
 +++ b/src/widget/wrx3smartfx.h
-@@ -0,0 +1,212 @@
+@@ -0,0 +1,225 @@
 +#pragma once
 +
-+#include <QComboBox>
-+#include <QDialog>
-+#include <QLabel>
++#include <QActionGroup>
++#include <QMenu>
 +#include <QPointer>
-+#include <QPushButton>
-+#include <QVBoxLayout>
++#include <QStringList>
 +#include <array>
 +#include <cmath>
 +#include <vector>
@@ -31,6 +29,9 @@ new file mode 100644
 +            : QObject(parent), m_config(config), m_effects(effects), m_parent(parent) {
 +        m_preset = qBound(0, config->getValue(ConfigKey(group(), "preset"), 0), 2);
 +        addControl("enabled", 0, [this](double value) { setEnabled(value > 0); });
++        addControl("toggle", 0, [this](double value) {
++            if (value > 0) ControlObject::set(ConfigKey(group(), "enabled"), m_active ? 0 : 1);
++        });
 +        addControl("preset", m_preset, [this](double value) {
 +            if (!std::isfinite(value) || value < 0 || value > 2) return;
 +            const int preset = qRound(value);
@@ -38,7 +39,7 @@ new file mode 100644
 +            m_preset = preset;
 +            m_config->setValue(ConfigKey(group(), "preset"), preset);
 +            if (m_active) loadPreset();
-+            if (m_selector) m_selector->setCurrentIndex(preset);
++            refreshMenuSelection();
 +        });
 +        addControl("knob1", 0.5, [this](double value) { setKnob(0, value); });
 +        addControl("knob2", 0.5, [this](double value) { setKnob(1, value); });
@@ -47,7 +48,7 @@ new file mode 100644
 +    }
 +    ~WRx3SmartFx() override {
 +        setEnabled(false);
-+        delete m_dialog.data();
++        delete m_menu.data();
 +    }
 +    static QString group() { return QStringLiteral("[RX3SmartFx]"); }
 +    static QString quickGroup(int deck) {
@@ -119,7 +120,6 @@ new file mode 100644
 +                saved.preset.clear();
 +            }
 +        }
-+        if (m_toggle) m_toggle->setChecked(m_active);
 +    }
 +    EffectManifestPointer manifest(const QString& name) const {
 +        return m_effects->getBackendManager()->getManifestFromUniqueId("org.mixxx.effects." + name);
@@ -174,34 +174,49 @@ new file mode 100644
 +        }
 +        ControlObject::set(ConfigKey(chain->group(), "enabled"), amount > 0 ? 1 : 0);
 +    }
++    void refreshMenuSelection() {
++        if (!m_menu) return;
++        for (auto* action : m_menu->actions())
++            action->setChecked(action->data().toInt() == m_preset);
++    }
 +    void showPresets() {
-+        if (!m_dialog) {
-+            m_dialog = new QDialog(m_parent->window());
-+            m_dialog->setObjectName("RX3SmartFxPresets");
-+            m_dialog->setWindowTitle("SMART CFX");
-+            m_dialog->setAttribute(Qt::WA_DeleteOnClose);
-+            auto* layout = new QVBoxLayout(m_dialog);
-+            layout->addWidget(new QLabel("SMART CFX PRESET", m_dialog));
-+            m_selector = new QComboBox(m_dialog);
-+            m_selector->setObjectName("RX3SmartFxPresetSelector");
-+            m_selector->addItems({"ECHO + FILTER", "REVERB + FILTER", "FILTER"});
-+            m_selector->setCurrentIndex(m_preset);
-+            layout->addWidget(m_selector);
-+            connect(m_selector, &QComboBox::currentIndexChanged, this, [](int index) {
-+                ControlObject::set(ConfigKey(group(), "preset"), index);
-+            });
-+            m_toggle = new QPushButton("SMART CFX ON", m_dialog);
-+            m_toggle->setCheckable(true);
-+            m_toggle->setChecked(m_active);
-+            layout->addWidget(m_toggle);
-+            connect(m_toggle, &QPushButton::clicked, this, [](bool checked) {
-+                ControlObject::set(ConfigKey(group(), "enabled"), checked ? 1 : 0);
-+            });
-+            layout->addWidget(new QLabel("Turn CFX to apply. Center returns to the original sound.", m_dialog));
++        if (m_menu && m_menu->isVisible()) {
++            m_menu->hide();
++            return;
 +        }
-+        m_dialog->show();
-+        m_dialog->raise();
-+        m_dialog->activateWindow();
++        auto* window = m_parent->window();
++        auto* anchor = window->findChild<QWidget*>("RX3SmartFxPreset");
++        if (anchor && !anchor->isVisible()) anchor = nullptr;
++        if (!m_menu) {
++            m_menu = new QMenu(window);
++            m_menu->setObjectName("RX3SmartFxPresets");
++            m_menu->setStyleSheet(
++                    "QMenu { background: #181818; color: #ddd; border: 1px solid #555; }"
++                    "QMenu::item { padding: 10px 18px; }"
++                    "QMenu::item:selected { background: #007ce0; color: #fff; }");
++            auto* choices = new QActionGroup(m_menu);
++            choices->setExclusive(true);
++            const QStringList names{"ECHO + FILTER", "REVERB + FILTER", "FILTER"};
++            for (int index = 0; index < names.size(); ++index) {
++                auto* action = m_menu->addAction(names[index]);
++                action->setCheckable(true);
++                action->setData(index);
++                choices->addAction(action);
++                connect(action, &QAction::triggered, this, [index] {
++                    ControlObject::set(ConfigKey(group(), "preset"), index);
++                });
++            }
++        }
++        auto font = (anchor ? anchor : window)->font();
++        font.setPixelSize(qMax(16, font.pixelSize()));
++        m_menu->setFont(font);
++        m_menu->setMinimumWidth(anchor ? anchor->width() : 180);
++        refreshMenuSelection();
++        // Hardware SHIFT + SMART CFX uses the same menu. When its on-screen
++        // anchor is hidden (BROWSE), place it at the top of the application.
++        const QPoint position = anchor ? anchor->mapToGlobal(QPoint(0, anchor->height())) :
++                window->mapToGlobal(QPoint(window->width() / 2, 0));
++        m_menu->popup(position);
 +    }
 +    UserSettingsPointer m_config;
 +    EffectsManager* m_effects;
@@ -211,9 +226,7 @@ new file mode 100644
 +    std::array<double, 2> m_knobs{{0.5, 0.5}};
 +    std::array<SavedChain, 2> m_saved;
 +    std::vector<std::unique_ptr<ControlObject>> m_controls;
-+    QPointer<QDialog> m_dialog;
-+    QPointer<QComboBox> m_selector;
-+    QPointer<QPushButton> m_toggle;
++    QPointer<QMenu> m_menu;
 +};
 diff --git a/src/widget/wrx3beatfx.h b/src/widget/wrx3beatfx.h
 --- a/src/widget/wrx3beatfx.h
@@ -249,7 +262,7 @@ diff --git a/src/test/rx3beatfx_test.cpp b/src/test/rx3beatfx_test.cpp
  #include "widget/wwidgetgroup.h"
  #include "widget/wnumber.h"
 
-@@ -98,6 +102,230 @@
+@@ -98,6 +102,254 @@
      std::unique_ptr<EffectsManager> effects;
      EffectSlotPointer slot;
  };
@@ -271,7 +284,7 @@ diff --git a/src/test/rx3beatfx_test.cpp b/src/test/rx3beatfx_test.cpp
 +    }
 +};
 +
-+TEST_F(Rx3SmartFxTest, SkinBadgeSharesControlsAndOpensPresetsOnRepeatedClicks) {
++TEST_F(Rx3SmartFxTest, SkinBadgeTogglesWithOneTapAndSelectsPresetsInPlace) {
 +    const QString skinDir = qEnvironmentVariable("NAUTIC_SKIN_DIR");
 +    if (skinDir.isEmpty()) GTEST_SKIP() << "Set NAUTIC_SKIN_DIR for actual skin bindings";
 +    QFile topbar(QDir(skinDir).filePath("topbar.xml"));
@@ -313,20 +326,39 @@ diff --git a/src/test/rx3beatfx_test.cpp b/src/test/rx3beatfx_test.cpp
 +        auto* preset = canvas->findChild<WPushButton*>("RX3SmartFxPreset");
 +        ASSERT_TRUE(status); ASSERT_TRUE(preset);
 +        EXPECT_EQ(0, status->readDisplayValue());
++        for (int i = 0; i < 3; ++i) {
++            QTest::mouseClick(status, Qt::LeftButton);
++            QTRY_COMPARE(status->readDisplayValue(), 1);
++            EXPECT_DOUBLE_EQ(1, ControlObject::get(ConfigKey(WRx3SmartFx::group(), "enabled")));
++            EXPECT_FALSE(parent.findChild<QMenu*>("RX3SmartFxPresets"));
++            QTest::mouseClick(status, Qt::LeftButton);
++            QTRY_COMPARE(status->readDisplayValue(), 0);
++            EXPECT_DOUBLE_EQ(0, ControlObject::get(ConfigKey(WRx3SmartFx::group(), "toggle")));
++        }
 +        set("enabled", 1);
 +        QTRY_COMPARE(status->readDisplayValue(), 1);
-+        for (auto* button : {preset, status, preset}) {
-+            QTest::mouseClick(button, Qt::LeftButton);
++        for (const int choice : {1, 2, 0}) {
++            QTest::mouseClick(preset, Qt::LeftButton);
 +            QCoreApplication::processEvents();
-+            auto* dialog = parent.findChild<QDialog*>("RX3SmartFxPresets");
-+            ASSERT_TRUE(dialog);
-+            EXPECT_TRUE(dialog->isVisible());
++            auto* menu = parent.findChild<QMenu*>("RX3SmartFxPresets");
++            ASSERT_TRUE(menu);
++            EXPECT_TRUE(menu->isVisible());
++            EXPECT_FALSE(parent.findChild<QDialog*>("RX3SmartFxPresets"));
 +            EXPECT_DOUBLE_EQ(0, ControlObject::get(ConfigKey(WRx3SmartFx::group(), "preset_open")));
-+            dialog->findChild<QComboBox*>()->setCurrentIndex(2);
-+            QTRY_COMPARE(preset->readDisplayValue(), 2);
++            auto* action = menu->actions().at(choice);
++            QTest::mouseClick(menu, Qt::LeftButton, Qt::NoModifier, menu->actionGeometry(action).center());
++            QCoreApplication::processEvents();
++            EXPECT_FALSE(menu->isVisible());
++            QTRY_COMPARE(preset->readDisplayValue(), choice);
++            EXPECT_TRUE(action->isChecked());
 +            EXPECT_EQ(1, status->readDisplayValue());
-+            dialog->hide();
 +        }
++        QTest::mouseClick(preset, Qt::LeftButton);
++        auto* menu = parent.findChild<QMenu*>("RX3SmartFxPresets");
++        ASSERT_TRUE(menu);
++        menu->close();
++        EXPECT_DOUBLE_EQ(0, ControlObject::get(ConfigKey(WRx3SmartFx::group(), "preset")));
++        EXPECT_DOUBLE_EQ(1, ControlObject::get(ConfigKey(WRx3SmartFx::group(), "enabled")));
 +        set("enabled", 0);
 +        QTRY_COMPARE(status->readDisplayValue(), 0);
 +    }
@@ -391,29 +423,34 @@ diff --git a/src/test/rx3beatfx_test.cpp b/src/test/rx3beatfx_test.cpp
 +    }
 +}
 +
-+TEST_F(Rx3SmartFxTest, PresetScreenSelectsWithoutEnablingAndPersistsSelection) {
++TEST_F(Rx3SmartFxTest, PresetMenuSelectsWithoutEnablingAndPersistsSelection) {
 +    QWidget parent;
++    parent.resize(600, 400); parent.show();
 +    {
 +        WRx3BeatFx panel(config(), effects.get(), &parent);
 +        set("preset_open", 1); set("preset_open", 0);
-+        auto* dialog = parent.findChild<QDialog*>("RX3SmartFxPresets");
-+        ASSERT_TRUE(dialog);
-+        auto* selector = dialog->findChild<QComboBox*>("RX3SmartFxPresetSelector");
-+        ASSERT_TRUE(selector);
-+        EXPECT_EQ(3, selector->count());
-+        EXPECT_EQ("FILTER", selector->itemText(2));
-+        selector->setCurrentIndex(1);
++        auto* menu = parent.findChild<QMenu*>("RX3SmartFxPresets");
++        ASSERT_TRUE(menu);
++        ASSERT_EQ(3, menu->actions().size());
++        EXPECT_EQ("FILTER", menu->actions().at(2)->text());
++        EXPECT_TRUE(menu->actions().at(0)->isChecked());
++        QTest::mouseClick(menu, Qt::LeftButton, Qt::NoModifier,
++                menu->actionGeometry(menu->actions().at(1)).center());
++        EXPECT_DOUBLE_EQ(1, ControlObject::get(ConfigKey(WRx3SmartFx::group(), "preset")));
 +        EXPECT_DOUBLE_EQ(0, ControlObject::get(ConfigKey(WRx3SmartFx::group(), "enabled")));
 +        set("enabled", 1);
 +        EXPECT_EQ("org.mixxx.effects.reverb", quick(0)->getEffectSlot(1)->id());
 +        EXPECT_EQ("org.mixxx.effects.reverb", quick(1)->getEffectSlot(1)->id());
-+        selector->setCurrentIndex(2);
++        set("preset_open", 1); set("preset_open", 0);
++        EXPECT_TRUE(menu->actions().at(1)->isChecked());
++        QTest::mouseClick(menu, Qt::LeftButton, Qt::NoModifier,
++                menu->actionGeometry(menu->actions().at(2)).center());
 +        EXPECT_FALSE(quick(0)->getEffectSlot(1)->isLoaded());
 +        EXPECT_FALSE(quick(1)->getEffectSlot(1)->isLoaded());
-+        dialog->close();
-+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
++        EXPECT_FALSE(menu->isVisible());
 +        EXPECT_DOUBLE_EQ(1, ControlObject::get(ConfigKey(WRx3SmartFx::group(), "enabled")));
 +    }
++    EXPECT_FALSE(parent.findChild<QMenu*>("RX3SmartFxPresets"));
 +    WRx3BeatFx restored(config(), effects.get(), &parent);
 +    EXPECT_DOUBLE_EQ(2, ControlObject::get(ConfigKey(WRx3SmartFx::group(), "preset")));
 +    EXPECT_DOUBLE_EQ(0, ControlObject::get(ConfigKey(WRx3SmartFx::group(), "enabled")));

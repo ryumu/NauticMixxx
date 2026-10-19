@@ -8,7 +8,7 @@
 
 - Keep the startup audio-output warning attached to the main window so an unconfigured output cannot leave the app waiting behind its launch screen.
 
-- Add DDJ-FLX4 Smart CFX controls: on/off, SHIFT preset screen, independent 14-bit CFX knobs and LED feedback. Provide Nautic ECHO + FILTER, REVERB + FILTER and standalone FILTER presets (minus: LPF, plus: HPF), dry center bypass and restoration of previous QuickEffect settings on exit. Show live status and the selected preset in the PERFORMANCE topbar; click either to open the preset screen. These use Mixxx DSP; rekordbox's proprietary presets and Smart Fader remain outside this implementation.
+- Add DDJ-FLX4 Smart CFX controls: on/off, SHIFT preset menu, independent 14-bit CFX knobs and LED feedback. Provide Nautic ECHO + FILTER, REVERB + FILTER and standalone FILTER presets (minus: LPF, plus: HPF), dry center bypass and restoration of previous QuickEffect settings on exit. The PERFORMANCE topbar offers one-tap on/off and an anchored preset menu. These use Mixxx DSP; rekordbox's proprietary presets and Smart Fader remain outside this implementation.
 
 ## 2.0.0 — 2026-10-13
 

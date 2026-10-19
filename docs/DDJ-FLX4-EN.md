@@ -48,15 +48,17 @@ these controls to the native app with the matching FLX4 preset:
 | Control | Action |
 | --- | --- |
 | SMART CFX | Toggle Smart CFX for both decks; the LED follows the software state. |
-| SHIFT + SMART CFX | Open the preset screen without changing the on/off state. |
+| SHIFT + SMART CFX | Open the preset menu without changing the on/off state. |
 | CFX CH1 / CH2 | Independently apply the selected combination to that channel. |
 
 The PERFORMANCE top bar shows **SMART CFX ON/OFF** and the selected preset
 between the transport progress bar and BROWSE. The ON state is highlighted in
-blue. Click either part of this display to open the preset/on-off screen;
-controller and screen changes update the display together.
+blue. Tap **SMART CFX ON/OFF** once to toggle it. Tap the preset name to open
+its menu directly below the button; the current choice is checked. Selecting
+a preset or dismissing the menu preserves the on/off state. Controller and
+screen changes update the display together.
 
-Choose **ECHO + FILTER**, **REVERB + FILTER** or **FILTER** in the preset screen.
+Choose **ECHO + FILTER**, **REVERB + FILTER** or **FILTER** in the preset menu.
 Left/minus rotation adds a low-pass sweep (LPF); right/plus rotation adds a
 high-pass sweep (HPF). **FILTER** uses only the filter, without echo or reverb.
 The other two presets also increase the echo/reverb send and feedback/decay in

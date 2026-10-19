@@ -583,7 +583,7 @@ occupied endpoints, to avoid counting one extra pixel with Linux font substituti
 
 ## 0051 — FLX4 Smart CFX
 
-- Add native Smart CFX enable, per-channel knob and preset-screen controls.
+- Add native Smart CFX enable, per-channel knob and preset-menu controls.
   Provide Nautic ECHO + FILTER, REVERB + FILTER and standalone FILTER presets,
   with independent channel processing, a dry center detent and persistent
   preset selection.
@@ -595,8 +595,10 @@ occupied endpoints, to avoid counting one extra pixel with Linux font substituti
   full 14-bit CFX input and synchronize the hardware LED with software changes.
   Stock Mixxx retains the ordinary QuickEffect knob path.
 - Reuse skin-created controls so the PERFORMANCE topbar badge shares enable
-  and preset state with the controller. Either part opens the preset screen,
-  including after repeated clicks and controller changes.
+  and preset state with the controller. The status button toggles on/off with
+  one tap; the preset name opens an anchored menu with the current choice checked.
+  Selecting or cancelling leaves activation unchanged. SHIFT + SMART CFX opens
+  the same menu, including when the topbar is hidden in BROWSE.
 - Test MIDI replay, selection UI, state restoration and rendered echo output.
   These built-in DSP combinations do not reproduce rekordbox's proprietary
   presets. Physical controller and listening validation remain pending.

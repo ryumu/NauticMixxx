@@ -1,5 +1,30 @@
 # NauticMixxx 2.0.0 test-candidate validation report
 
+## Smart CFX one-tap controls and preset menu — validation (2026-10-19)
+
+- The PERFORMANCE status button now toggles Smart CFX with one tap. The adjacent
+  preset name opens a checked three-item menu directly beneath the button.
+  Selection and cancellation preserve activation. SHIFT + SMART CFX opens the
+  same menu; the separate preset/on-off dialog is removed.
+- Linux aarch64 application/test builds passed. All 19 focused native checks
+  passed, including actual skin bindings, repeated status clicks, mouse selection
+  from the menu, preset persistence, QuickEffect restoration, rendered DSP and
+  the existing browser/menu/window regressions. FLX4 MIDI replay passed.
+- Launched the rebuilt executable through the actual desktop entry with an
+  isolated profile. Wayland checks verified repeated one-tap activation, menu
+  placement within the screen, state updates and cancellation. Menu selection
+  in this live check uses Qt key activation because QtTest cursor warping is not
+  supported by Wayland; mouse selection is covered by the offscreen native tests.
+  Physical touchscreen/controller and listening checks remain pending.
+- All 54 patches apply cleanly and reproduce the Smart CFX native sources.
+  Windows identifier/installer, public audit and Linux staged package checks
+  passed. Native Windows/macOS builds were not run.
+- Installed the rebuilt desktop target and refreshed both the desktop shortcut
+  and application-menu entry. The desktop shortcut is executable and trusted;
+  the launch check verified its exact executable path. Restart an existing
+  session to load the new controls.
+- Evidence: `build/test-candidate/2.0.0-linux-aarch64/validation/smart-cfx-menu/`.
+
 ## APP MENU show/hide toggle — validation (2026-10-19)
 
 - APP MENU now hides a visible menu bar and restores a hidden one, including
