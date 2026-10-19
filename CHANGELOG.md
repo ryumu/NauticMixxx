@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add touch-accessible APP MENU buttons in PERFORMANCE and BROWSE to restore the hidden application menu bar without a keyboard, including on Raspberry Pi.
+- Add touch-accessible APP MENU buttons in PERFORMANCE and BROWSE to show or hide the application menu bar without a keyboard, including on Raspberry Pi.
 
 - Fit application windows to the available screen area and keep oversized operation dialogs scrollable, including on smaller or scaled displays.
 

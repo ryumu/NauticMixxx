@@ -18,7 +18,7 @@ diff --git a/src/widget/wmainmenubar.h b/src/widget/wmainmenubar.h
 diff --git a/src/widget/wmainmenubar.cpp b/src/widget/wmainmenubar.cpp
 --- a/src/widget/wmainmenubar.cpp
 +++ b/src/widget/wmainmenubar.cpp
-@@ -78,9 +78,20 @@
+@@ -78,9 +78,22 @@
                             ConfigObject<ConfigValueKbd>* pKbdConfig)
          : QMenuBar(pParent),
            m_pConfig(pConfig),
@@ -30,9 +30,11 @@ diff --git a/src/widget/wmainmenubar.cpp b/src/widget/wmainmenubar.cpp
 +    connect(&m_showMenuBar, &ControlObject::valueChanged, this, [this](double value) {
 +        if (value <= 0) return;
 +#ifndef __APPLE__
-+        // Keep auto-hide enabled, but allow touch-only systems to recover the
-+        // application menu without an Alt key or changing their preferences.
-+        showMenuBar();
++        if (isNativeMenuBar()) return;
++        // A touch can also hide a pinned menu. hideMenuBar() only hides when
++        // auto-hide is enabled; do not change that preference for this action.
++        if (height() > 0) setFixedHeight(0);
++        else showMenuBar();
 +#else
 +        show();
 +#endif
@@ -53,8 +55,8 @@ diff --git a/src/widget/wrx3browser.h b/src/widget/wrx3browser.h
 +            ControlObject::set(key, 1);
 +            ControlObject::set(key, 0);
 +        });
-+        appMenu->setToolTip("Show the application menu bar");
-+        appMenu->setAccessibleName("Show application menu");
++        appMenu->setToolTip("Show or hide the application menu bar");
++        appMenu->setAccessibleName("Show or hide application menu");
 +        appMenu->setFocusPolicy(Qt::NoFocus);
          layout->addWidget(header);
          m_pages = new QStackedWidget(this); layout->addWidget(m_pages, 1);
@@ -63,7 +65,7 @@ diff --git a/src/test/rx3touchmenu_test.cpp b/src/test/rx3touchmenu_test.cpp
 new file mode 100644
 --- /dev/null
 +++ b/src/test/rx3touchmenu_test.cpp
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,76 @@
 +#include <QtTest>
 +#include <QDomDocument>
 +#include <QVBoxLayout>
@@ -77,7 +79,7 @@ new file mode 100644
 +
 +class Rx3TouchMenuTest : public MixxxTest {};
 +
-+TEST_F(Rx3TouchMenuTest, PerformanceButtonRecoversHiddenMenuRepeatedlyWithoutChangingAutoHide) {
++TEST_F(Rx3TouchMenuTest, PerformanceButtonTogglesMenuWithoutChangingAutoHide) {
 +#ifdef __APPLE__
 +    GTEST_SKIP() << "macOS manages the native menu bar";
 +#else
@@ -121,15 +123,19 @@ new file mode 100644
 +    ASSERT_TRUE(appMenu);
 +    config()->setValue(ConfigKey("[Config]", "hide_menubar"), 1);
 +    window.show();
-+    for (int i = 0; i < 3; ++i) {
-+        menu.hideMenuBar();
++    for (const bool autoHide : {false, true}) {
++        config()->setValue(ConfigKey("[Config]", "hide_menubar"), autoHide ? 1 : 0);
++        menu.showMenuBar();
 +        QCoreApplication::processEvents();
-+        ASSERT_EQ(0, menu.height());
-+        QTest::mouseClick(appMenu, Qt::LeftButton);
-+        QCoreApplication::processEvents();
-+        EXPECT_GT(menu.height(), 0);
-+        EXPECT_EQ(0, ControlObject::get(ConfigKey("[Master]", "show_menubar")));
-+        EXPECT_TRUE(config()->getValue<bool>(ConfigKey("[Config]", "hide_menubar"), false));
++        ASSERT_GT(menu.height(), 0);
++        for (int i = 0; i < 6; ++i) {
++            QTest::mouseClick(appMenu, Qt::LeftButton);
++            QCoreApplication::processEvents();
++            if (i % 2 == 0) EXPECT_EQ(0, menu.height());
++            else EXPECT_GT(menu.height(), 0);
++            EXPECT_EQ(0, ControlObject::get(ConfigKey("[Master]", "show_menubar")));
++            EXPECT_EQ(autoHide, config()->getValue<bool>(ConfigKey("[Config]", "hide_menubar"), false));
++        }
 +    }
 +    window.hide();
 +    delete canvas;
@@ -147,12 +153,12 @@ diff --git a/src/test/rx3browserload_test.cpp b/src/test/rx3browserload_test.cpp
 
  // Use a selection-only table: row painting and SQL/provider projection are
  // tested separately. The real hardware LOAD controls remain the boundary.
-@@ -208,3 +209,33 @@
+@@ -208,3 +209,37 @@
          }
      }
  }
 +
-+TEST_F(Rx3BrowserLoadTest, AppMenuButtonRecoversHiddenMenuWithoutLeavingBrowser) {
++TEST_F(Rx3BrowserLoadTest, AppMenuButtonTogglesMenuWithoutLeavingBrowser) {
 +#ifdef __APPLE__
 +    GTEST_SKIP() << "macOS manages the native menu bar";
 +#else
@@ -167,15 +173,19 @@ diff --git a/src/test/rx3browserload_test.cpp b/src/test/rx3browserload_test.cpp
 +    auto* appMenu = button("RX3BrowserAppMenu");
 +    ASSERT_TRUE(appMenu);
 +    ASSERT_TRUE(appMenu->isVisible());
-+    for (int i = 0; i < 3; ++i) {
-+        menu.hideMenuBar();
++    for (const bool autoHide : {false, true}) {
++        config()->setValue(ConfigKey("[Config]", "hide_menubar"), autoHide ? 1 : 0);
++        menu.showMenuBar();
 +        QCoreApplication::processEvents();
-+        ASSERT_EQ(0, menu.height());
-+        QTest::mouseClick(appMenu, Qt::LeftButton);
-+        QCoreApplication::processEvents();
-+        EXPECT_GT(menu.height(), 0);
-+        EXPECT_EQ(0, ControlObject::get(ConfigKey("[Master]", "show_menubar")));
-+        EXPECT_TRUE(config()->getValue<bool>(ConfigKey("[Config]", "hide_menubar"), false));
++        ASSERT_GT(menu.height(), 0);
++        for (int i = 0; i < 6; ++i) {
++            QTest::mouseClick(appMenu, Qt::LeftButton);
++            QCoreApplication::processEvents();
++            if (i % 2 == 0) EXPECT_EQ(0, menu.height());
++            else EXPECT_GT(menu.height(), 0);
++            EXPECT_EQ(0, ControlObject::get(ConfigKey("[Master]", "show_menubar")));
++            EXPECT_EQ(autoHide, config()->getValue<bool>(ConfigKey("[Config]", "hide_menubar"), false));
++        }
 +        EXPECT_EQ(1, tab->get());
 +        EXPECT_FALSE(play[0]->get()); EXPECT_FALSE(play[1]->get());
 +    }

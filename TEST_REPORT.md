@@ -1,5 +1,19 @@
 # NauticMixxx 2.0.0 test-candidate validation report
 
+## APP MENU show/hide toggle — validation (2026-10-19)
+
+- APP MENU now hides a visible menu bar and restores a hidden one, including
+  when auto-hide is disabled. The auto-hide preference remains unchanged.
+- Linux aarch64 application/test builds and all 19 focused native checks passed.
+  Both actual buttons alternate visibility repeatedly with auto-hide on and off;
+  existing browser, Smart CFX and window geometry checks remain successful.
+- Wayland GUI checks passed in PERFORMANCE, BROWSE and fullscreen, including
+  confirming that the menu stays hidden after releasing the button.
+- Updated patch 0054 reproduces the native sources. Windows identifier/installer,
+  public audit and Linux staged package checks passed. The rebuilt desktop target
+  is installed; restart an existing session to use it.
+- Evidence: `build/test-candidate/2.0.0-linux-aarch64/validation/menu-toggle/`.
+
 ## Touch-only application menu recovery — validation (2026-10-19)
 
 - Added APP MENU beside BROWSE in PERFORMANCE and at the right of the BROWSE
