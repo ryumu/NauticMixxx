@@ -38,3 +38,45 @@ These bindings require the native app with patch 0050 and the matching mapping.
 Official Mixxx retains the original three-slot effect selection and toggling.
 Automated checks cover switch event ordering, stale slot state, LED feedback,
 selection and beat stepping; physical FLX4 and audio-output checks are pending.
+
+## Smart CFX in the native app
+
+The [DDJ-FLX4 manual, page 72](https://downloads.support.alphatheta.com/manuals/DDJ_FLX4_DRJ1092A_manual/?page=72)
+describes the Smart CFX button, preset screen and CFX knobs. Patch 0051 adds
+these controls to the native app with the matching FLX4 preset:
+
+| Control | Action |
+| --- | --- |
+| SMART CFX | Toggle Smart CFX for both decks; the LED follows the software state. |
+| SHIFT + SMART CFX | Open the preset screen without changing the on/off state. |
+| CFX CH1 / CH2 | Independently apply the selected combination to that channel. |
+
+The PERFORMANCE top bar shows **SMART CFX ON/OFF** and the selected preset
+between the transport progress bar and BROWSE. The ON state is highlighted in
+blue. Click either part of this display to open the preset/on-off screen;
+controller and screen changes update the display together.
+
+Choose **ECHO + FILTER**, **REVERB + FILTER** or **FILTER** in the preset screen.
+Left/minus rotation adds a low-pass sweep (LPF); right/plus rotation adds a
+high-pass sweep (HPF). **FILTER** uses only the filter, without echo or reverb.
+The other two presets also increase the echo/reverb send and feedback/decay in
+both directions. The center detent bypasses the effect and returns to the
+original sound. Echo uses a half-beat delay synchronized to that deck's beat
+information.
+
+These are NauticMixxx combinations of Mixxx's built-in processors. They do not
+reproduce rekordbox's proprietary Smart CFX preset catalog, loop or key macros.
+Smart Fader is separate and remains unimplemented.
+
+Smart CFX temporarily uses the two deck QuickEffect chains. Turning it off,
+disconnecting the controller or unloading the skin restores their previous
+effects, parameters, mix and enable states. The next ordinary CFX movement
+resumes control of the restored QuickEffect. Beat FX remains independent.
+The selected preset is remembered; Smart CFX starts off on connection.
+The original full-resolution filter bindings work in stock Mixxx, where the
+native Smart CFX API is unavailable.
+
+Automated checks cover MIDI messages, knob precision, center bypass, channel
+independence, preset selection, LED feedback, state restoration and rendered
+echo audio and standalone LPF/HPF frequency attenuation. Physical FLX4 and
+listening checks remain pending.

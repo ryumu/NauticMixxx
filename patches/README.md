@@ -580,3 +580,44 @@ occupied endpoints, to avoid counting one extra pixel with Linux font substituti
 - Test first selection, wraparound, repeated steps and passive beat adjustment.
   The FLX4 mapping separately tests the unit gate, hidden-slot cleanup, channel
   routing, LED feedback and stock Mixxx fallback.
+
+## 0051 — FLX4 Smart CFX
+
+- Add native Smart CFX enable, per-channel knob and preset-screen controls.
+  Provide Nautic ECHO + FILTER, REVERB + FILTER and standalone FILTER presets,
+  with independent channel processing, a dry center detent and persistent
+  preset selection.
+  Standalone FILTER uses LPF on the minus side and HPF on the plus side.
+- Snapshot both QuickEffect chains and restore all processors, parameters,
+  mix and enable states on disable, controller shutdown or skin destruction.
+  Keep the Beat FX unit independent. Do not modify tempo, loops or key.
+- Bind SMART CFX and SHIFT + SMART CFX using the official MIDI notes, retain
+  full 14-bit CFX input and synchronize the hardware LED with software changes.
+  Stock Mixxx retains the ordinary QuickEffect knob path.
+- Reuse skin-created controls so the PERFORMANCE topbar badge shares enable
+  and preset state with the controller. Either part opens the preset screen,
+  including after repeated clicks and controller changes.
+- Test MIDI replay, selection UI, state restoration and rendered echo output.
+  These built-in DSP combinations do not reproduce rekordbox's proprietary
+  presets. Physical controller and listening validation remain pending.
+
+## 0052 — Keep the startup audio prompt above the launch window
+
+- Parent the no-output-device dialog to the main window so the desktop window
+  manager can keep it above the launch screen, including in Wayland sessions.
+- Preserve the existing Continue, Reconfigure and Exit choices. Audio routing
+  and the requirement to configure an output before hearing audio are unchanged.
+
+## 0053 — Fit application windows to the available screen
+
+- Keep ordinary windows inside the current screen's work area, including
+  title bars, taskbars/docks, restored positions and display changes. Use
+  logical screen coordinates so display scaling is respected.
+- Fit the RX3 reference canvas through its existing scaler on smaller screens.
+  Oversized plain operation dialogs gain scrollbars so their controls remain
+  reachable. Preserve Qt's specialized dialog layouts and platform handling
+  of menus, maximized windows and fullscreen windows.
+- Test decorated fixed-size windows, oversized dialog acceptance after scrolling,
+  negative monitor coordinates and automatic correction after showing/moving.
+- On Wayland, maximize capped windows through the compositor to correct their
+  position as well as their size; ordinary dialogs keep their original size.

@@ -1,0 +1,13 @@
+diff --git a/src/mixxxmainwindow.cpp b/src/mixxxmainwindow.cpp
+--- a/src/mixxxmainwindow.cpp
++++ b/src/mixxxmainwindow.cpp
+@@ -840,7 +840,8 @@
+ }
+
+ QDialog::DialogCode MixxxMainWindow::noOutputDlg(bool* continueClicked) {
+-    QMessageBox msgBox;
++    // Keep this startup prompt above the launch window, including on Wayland.
++    QMessageBox msgBox(this);
+     msgBox.setIcon(QMessageBox::Warning);
+     msgBox.setWindowTitle(tr("No Output Devices"));
+     msgBox.setText(

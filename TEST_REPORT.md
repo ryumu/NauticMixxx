@@ -1,5 +1,76 @@
 # NauticMixxx 2.0.0 test-candidate validation report
 
+## Fit application windows to the screen — validation (2026-10-19)
+
+- Patch 0053 fits ordinary application windows to the available screen area,
+  including decorations and display scaling. Oversized plain operation dialogs
+  gain scrollbars; specialized dialogs retain their existing layouts. Wayland
+  uses compositor maximization when resizing alone would leave a window's
+  previous position beyond the edge.
+- Linux aarch64 application/test builds passed. All 11 focused native tests
+  passed: six Smart CFX checks and five window geometry checks covering work
+  areas, negative monitor origins, fixed sizes, scrolling to and activating
+  dialog buttons, show/move correction and platform-managed window states.
+- Actual Wayland application checks passed for the main window, Smart CFX
+  dialog and Preferences, including forced oversized main/Smart CFX windows.
+  Inspected captures confirm Preferences buttons remain accessible.
+- All 53 patches apply to pristine Mixxx 2.5.6 and reproduce the changed native
+  window/Smart CFX sources. Windows identifier/installer checks, Linux staged
+  package checks and the public release audit passed. Native Windows runtime
+  and physical controller/audio checks remain pending.
+- Updated the desktop launch target with the rebuilt executable and resources.
+  An already running user session retains its current binary until restart.
+- Evidence: `build/test-candidate/2.0.0-linux-aarch64/validation/window-fit/`.
+
+## Desktop startup audio prompt — validation (2026-10-19)
+
+- The desktop process was waiting in `MixxxMainWindow::noOutputDlg` with no
+  configured audio outputs. The unparented prompt could remain behind the
+  launch window. Patch 0052 attaches it to the main window.
+- Linux aarch64 rebuild passed. In the desktop Wayland environment, a separate
+  profile with the same empty audio configuration displayed the parented prompt
+  and reached the 1280×800 PERFORMANCE view after Continue. Audio routing was
+  preserved. The warning still offers Continue, Reconfigure and Exit.
+- Updated the desktop launch target and verified the normal user profile reaches
+  the visible main window. Selected Continue once without changing audio output
+  assignments; the application was left running. Desktop-process and screenshot
+  evidence is stored in the `desktop/` subdirectory.
+- All 52 patches apply to pristine Mixxx 2.5.6. Windows identifier/installer
+  checks, Linux package checks and the public release audit passed.
+- Evidence: `build/test-candidate/2.0.0-linux-aarch64/validation/startup-dialog-fix/`.
+
+## DDJ-FLX4 Smart CFX — source validation (2026-10-18)
+
+- Added patch 0051 and matching controller bindings for SMART CFX on/off,
+  SHIFT preset screen, independent 14-bit CFX knobs and hardware LED feedback.
+  Nautic ECHO + FILTER, REVERB + FILTER and standalone FILTER use Mixxx built-in DSP;
+  they do not reproduce rekordbox's proprietary presets. Smart Fader is separate.
+- Linux aarch64 `mixxx` and `mixxx-test` builds passed. All six new native
+  Smart CFX tests passed: centered/channel-independent processing, complete
+  QuickEffect restoration on disable/destruction, preset UI/persistence and
+  rendered half-beat echo output. Standalone FILTER loads no echo/reverb,
+  preserves its selection across restart, renders LPF on the minus side and
+  HPF on the plus side, and bypasses at center. Rendered 100 Hz/8 kHz tones
+  confirm the expected attenuation independently on both channels.
+- Added the persistent PERFORMANCE topbar Smart CFX badge between transport
+  and BROWSE. Native tests parse its real XML before constructing the FX
+  controls, verify shared enable/preset state and repeatedly open the preset
+  screen from both parts. Actual 1280×800 app captures show OFF, FILTER ON and
+  REVERB + FILTER ON; the click-through preset dialog was captured as well.
+- FLX4 Smart CFX MIDI replay, Beat FX mapping, browser mapping, full-preset
+  contracts and shared shortcut/transport tests passed. Windows installer and
+  skin-package contracts, Linux package checks and the public release audit
+  passed. The preventive Windows identifier check remains enabled; Windows
+  compilation and physical FLX4/listening checks were not run.
+- All 51 patches applied to pristine Mixxx 2.5.6; the resulting Smart CFX files
+  match the native build sources.
+- Existing Beat FX native checks: 18/26 passed in this headless environment.
+  Eight chooser-related checks failed (four crashed after menu selection).
+  Recompiling the original Beat FX header and test file reproduced the same
+  eight exit statuses. This is an existing validation limitation, not a clean
+  full-suite result. The new Smart CFX suite passes independently.
+- Local evidence: `build/test-candidate/2.0.0-linux-aarch64/validation/smart-cfx/`.
+
 ## Unified UTILITY macOS candidate delivered (2026-10-11)
 
 - Packaged user-authorized 2.0.0-utility-2 with patch 0044, a separate English

@@ -21,7 +21,8 @@ assert len(controls) >= 200  # Keep the original full controller mapping.
 assert len(root.findall("./controller/outputs/output")) >= 100
 messages = [(control.findtext("status"), control.findtext("midino")) for control in controls]
 assert not [message for message, count in Counter(messages).items() if count > 1]
-added_messages = {("0x96", "0x68"), ("0x96", "0x7A")}
+added_messages = {("0x96", "0x68"), ("0x96", "0x7A"),
+                  ("0x96", "0x00"), ("0x96", "0x08")}
 original_messages = sorted(set(messages) - added_messages)
 original_signature = sha256(
     "\n".join(f"{status}:{number}" for status, number in original_messages).encode()
@@ -44,6 +45,12 @@ expected = {
     ("0x95", "0x47"): ("[EffectRack1_EffectUnit1]", "PioneerDDJFLX4.beatFxOnOffPressed"),
     ("0x94", "0x4A"): ("[EffectRack1_EffectUnit1]", "PioneerDDJFLX4.beatFxLeftPressed"),
     ("0x94", "0x4B"): ("[EffectRack1_EffectUnit1]", "PioneerDDJFLX4.beatFxRightPressed"),
+    ("0x96", "0x00"): ("[RX3SmartFx]", "PioneerDDJFLX4.smartFxPressed"),
+    ("0x96", "0x08"): ("[RX3SmartFx]", "PioneerDDJFLX4.smartFxPresetPressed"),
+    ("0xB6", "0x17"): ("[QuickEffectRack1_[Channel1]]", "PioneerDDJFLX4.cfxKnobMSB"),
+    ("0xB6", "0x18"): ("[QuickEffectRack1_[Channel2]]", "PioneerDDJFLX4.cfxKnobMSB"),
+    ("0xB6", "0x37"): ("[QuickEffectRack1_[Channel1]]", "PioneerDDJFLX4.cfxKnobLSB"),
+    ("0xB6", "0x38"): ("[QuickEffectRack1_[Channel2]]", "PioneerDDJFLX4.cfxKnobLSB"),
 }
 by_message = dict(zip(messages, controls))
 for message, (group, key) in expected.items():

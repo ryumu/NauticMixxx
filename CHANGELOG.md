@@ -1,5 +1,13 @@
 # Historial de cambios
 
+## Unreleased
+
+- Fit application windows to the available screen area and keep oversized operation dialogs scrollable, including on smaller or scaled displays.
+
+- Keep the startup audio-output warning attached to the main window so an unconfigured output cannot leave the app waiting behind its launch screen.
+
+- Add DDJ-FLX4 Smart CFX controls: on/off, SHIFT preset screen, independent 14-bit CFX knobs and LED feedback. Provide Nautic ECHO + FILTER, REVERB + FILTER and standalone FILTER presets (minus: LPF, plus: HPF), dry center bypass and restoration of previous QuickEffect settings on exit. Show live status and the selected preset in the PERFORMANCE topbar; click either to open the preset screen. These use Mixxx DSP; rekordbox's proprietary presets and Smart Fader remain outside this implementation.
+
 ## 2.0.0 — 2026-10-13
 
 - Correct Windows MY SETTINGS atomic saves by releasing validation handles before replacing files; configure standalone native logo-test resources explicitly.

@@ -15,6 +15,7 @@
 //      * Beat Loop Mode
 //      * Beat Jump Mode
 //      * Sampler Mode
+//      * Smart CFX (native NauticMixxx): toggle, preset chooser and CFX knobs
 //
 //  Custom (Mixxx specific mappings):
 //      * BeatFX: Assigned Effect Unit 1
@@ -46,7 +47,6 @@
 //        * Keyshift mode
 //
 //  Not implemented yet (but might be in the future):
-//      * Smart CFX
 //      * Smart fader
 
 var PioneerDDJFLX4 = {};
@@ -233,6 +233,12 @@ PioneerDDJFLX4.toggleLight = function(midiIn, active) {
 //
 
 PioneerDDJFLX4.init = function() {
+    PioneerDDJFLX4.cfxMSB = [undefined, undefined];
+    if (PioneerDDJFLX4.nativeSmartFx()) {
+        engine.setValue("[RX3SmartFx]", "enabled", 0);
+        engine.makeConnection("[RX3SmartFx]", "enabled", PioneerDDJFLX4.smartFxLight);
+    }
+    PioneerDDJFLX4.smartFxLight();
     engine.setValue("[EffectRack1_EffectUnit1]", "show_focus", 1);
     if (PioneerDDJFLX4.nativeBeatFx()) {
         // A newly connected controller starts with Beat FX off, including any
@@ -295,6 +301,49 @@ PioneerDDJFLX4.init = function() {
 
     // query the controller for current control positions on startup
     PioneerDDJFLX4.sendKeepAlive(); // the query seems to double as a keep alive message
+};
+
+//
+// Smart CFX
+//
+
+PioneerDDJFLX4.nativeSmartFx = function() {
+    return engine.getValue("[RX3SmartFx]", "available") > 0;
+};
+
+PioneerDDJFLX4.smartFxLight = function() {
+    midi.sendShortMsg(0x96, 0x00, PioneerDDJFLX4.nativeSmartFx() &&
+        engine.getValue("[RX3SmartFx]", "enabled") > 0 ? 0x7F : 0);
+};
+
+PioneerDDJFLX4.smartFxPressed = function(_channel, _control, value, status) {
+    if (value === 0 || (status & 0xF0) === 0x80 || !PioneerDDJFLX4.nativeSmartFx()) return;
+    engine.setValue("[RX3SmartFx]", "enabled",
+        engine.getValue("[RX3SmartFx]", "enabled") > 0 ? 0 : 1);
+};
+
+PioneerDDJFLX4.smartFxPresetPressed = function(_channel, _control, value, status) {
+    if (value === 0 || (status & 0xF0) === 0x80 || !PioneerDDJFLX4.nativeSmartFx()) return;
+    engine.setValue("[RX3SmartFx]", "preset_open", 1);
+    engine.setValue("[RX3SmartFx]", "preset_open", 0);
+};
+
+PioneerDDJFLX4.cfxMSB = [undefined, undefined];
+PioneerDDJFLX4.cfxKnobMSB = function(_channel, control, value) {
+    PioneerDDJFLX4.cfxMSB[control - 0x17] = value;
+};
+
+PioneerDDJFLX4.cfxKnobLSB = function(_channel, control, value, _status, group) {
+    const deck = control - 0x37;
+    const msb = PioneerDDJFLX4.cfxMSB[deck];
+    if (msb === undefined) return;
+    const position = ((msb << 7) + value) / 0x3FFF;
+    if (PioneerDDJFLX4.nativeSmartFx()) {
+        // Track both physical knob positions even while Smart CFX is off.
+        engine.setValue("[RX3SmartFx]", "knob" + (deck + 1), position);
+        if (engine.getValue("[RX3SmartFx]", "enabled") > 0) return;
+    }
+    engine.setParameter(group, "super1", position);
 };
 
 //
@@ -877,6 +926,8 @@ PioneerDDJFLX4.quickJumpBack = function(_channel, _control, value, _status, grou
 //
 
 PioneerDDJFLX4.shutdown = function() {
+    if (PioneerDDJFLX4.nativeSmartFx()) engine.setValue("[RX3SmartFx]", "enabled", 0);
+    midi.sendShortMsg(0x96, 0x00, 0);
     // reset vumeter
     PioneerDDJFLX4.toggleLight(PioneerDDJFLX4.lights.deck1.vuMeter, false);
     PioneerDDJFLX4.toggleLight(PioneerDDJFLX4.lights.deck2.vuMeter, false);

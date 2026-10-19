@@ -1,0 +1,266 @@
+diff --git a/src/util/windowgeometry.h b/src/util/windowgeometry.h
+new file mode 100644
+--- /dev/null
++++ b/src/util/windowgeometry.h
+@@ -0,0 +1,139 @@
++#pragma once
++
++#include <QApplication>
++#include <QDialog>
++#include <QEvent>
++#include <QLayout>
++#include <QPointer>
++#include <QScreen>
++#include <QScrollArea>
++#include <QTimer>
++#include <QVBoxLayout>
++#include <QVariant>
++#include <QWidget>
++
++namespace nautic {
++
++inline QRect windowRectWithinScreen(QRect frame, const QRect& available) {
++    if (!available.isValid()) return frame;
++    frame.setSize(frame.size().boundedTo(available.size()).expandedTo(QSize(1, 1)));
++    frame.moveLeft(qBound(available.left(), frame.left(), available.right() - frame.width() + 1));
++    frame.moveTop(qBound(available.top(), frame.top(), available.bottom() - frame.height() + 1));
++    return frame;
++}
++
++// Install once with the main window. Popups and fullscreen/maximized windows
++// retain their platform placement; ordinary application windows use work areas,
++// which exclude taskbars and docks and are expressed in logical pixels.
++class WindowGeometryGuard : public QObject {
++  public:
++    explicit WindowGeometryGuard(QObject* parent = nullptr) : QObject(parent) {
++        qApp->installEventFilter(this);
++        for (auto* screen : QGuiApplication::screens()) watchScreen(screen);
++        connect(qApp, &QGuiApplication::screenAdded, this, [this](QScreen* screen) {
++            watchScreen(screen); scheduleWindows();
++        });
++        connect(qApp, &QGuiApplication::screenRemoved, this, [this] { scheduleWindows(); });
++    }
++
++    static bool manages(const QWidget* window) {
++        if (!window || !window->isWindow() || window->isFullScreen() || window->isMaximized()) return false;
++        const auto type = window->windowType();
++        return type == Qt::Window || type == Qt::Dialog || type == Qt::Tool;
++    }
++
++    static void fit(QWidget* window, const QRect& available) {
++        if (!manages(window) || !available.isValid()) return;
++        const QRect frame = window->frameGeometry();
++        const QRect fitted = windowRectWithinScreen(frame, available);
++        const QSize decoration(qMax(0, frame.width() - window->width()),
++                qMax(0, frame.height() - window->height()));
++        const QSize client = (fitted.size() - decoration).expandedTo(QSize(1, 1));
++        if (window->size() != client) {
++            // Plain QDialogs are used by Smart CFX and native operation panels.
++            // Leave Qt's specialized dialogs' private layouts intact.
++            if (qobject_cast<QDialog*>(window) &&
++                    QByteArray(window->metaObject()->className()) == "QDialog" && window->layout() &&
++                    !window->findChild<QScrollArea*>("NauticWindowScroll", Qt::FindDirectChildrenOnly)) {
++                const QSize minimum = window->minimumSize().expandedTo(window->minimumSizeHint());
++                auto* content = new QWidget;
++                content->setLayout(window->layout());
++                content->setMinimumSize(minimum.expandedTo(content->minimumSizeHint()));
++                auto* scroll = new QScrollArea(window);
++                scroll->setObjectName("NauticWindowScroll");
++                scroll->setFrameShape(QFrame::NoFrame);
++                scroll->setWidgetResizable(true);
++                scroll->setWidget(content);
++                auto* layout = new QVBoxLayout(window);
++                layout->setContentsMargins(0, 0, 0, 0);
++                layout->setSizeConstraint(QLayout::SetNoConstraint);
++                layout->addWidget(scroll);
++            }
++            const bool fixed = window->minimumSize() == window->maximumSize();
++            if (window->layout() && window->minimumSizeHint().expandedTo(client) != client)
++                window->layout()->setSizeConstraint(QLayout::SetNoConstraint);
++            if (fixed) {
++                window->setFixedSize(client);
++            } else {
++                window->setMinimumSize(window->minimumSize().boundedTo(client));
++                window->resize(client);
++            }
++        }
++        // Wayland cannot move an already mapped top-level window. Ask the
++        // compositor to place a capped window in the work area as well, since
++        // resizing alone can leave its old centered origin beyond the edge.
++        if (QGuiApplication::platformName().startsWith("wayland")) {
++            if (frame.size() != fitted.size()) window->showMaximized();
++        } else {
++            const auto current = window->frameGeometry();
++            const auto position = windowRectWithinScreen(current, available).topLeft();
++            if (position != current.topLeft()) window->move(window->pos() + position - current.topLeft());
++        }
++    }
++
++  protected:
++    bool eventFilter(QObject* watched, QEvent* event) override {
++        switch (event->type()) {
++        case QEvent::Show:
++        case QEvent::Resize:
++        case QEvent::Move:
++        case QEvent::LayoutRequest:
++        case QEvent::ScreenChangeInternal:
++            if (!m_adjusting) {
++                auto* window = qobject_cast<QWidget*>(watched);
++                if (manages(window)) schedule(window);
++            }
++            break;
++        default: break;
++        }
++        return QObject::eventFilter(watched, event);
++    }
++
++  private:
++    void watchScreen(QScreen* screen) {
++        connect(screen, &QScreen::availableGeometryChanged, this, [this] { scheduleWindows(); });
++    }
++    void scheduleWindows() {
++        for (auto* window : QApplication::topLevelWidgets())
++            if (window->isVisible() && manages(window)) schedule(window);
++    }
++    void schedule(QWidget* window) {
++        if (window->property("nauticWindowFitPending").toBool()) return;
++        window->setProperty("nauticWindowFitPending", true);
++        const QPointer<QWidget> guarded(window);
++        QTimer::singleShot(0, this, [this, guarded] {
++            if (!guarded) return;
++            guarded->setProperty("nauticWindowFitPending", false);
++            if (!guarded->isVisible() || !manages(guarded)) return;
++            QScreen* screen = guarded->parentWidget() ? guarded->parentWidget()->screen() : guarded->screen();
++            if (!screen || !QGuiApplication::screens().contains(screen)) screen = QGuiApplication::primaryScreen();
++            if (!screen) return;
++            m_adjusting = true;
++            fit(guarded, screen->availableGeometry());
++            m_adjusting = false;
++        });
++    }
++    bool m_adjusting = false;
++};
++
++} // namespace nautic
+diff --git a/src/test/windowgeometry_test.cpp b/src/test/windowgeometry_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/test/windowgeometry_test.cpp
+@@ -0,0 +1,87 @@
++#include <QtTest>
++#include <QDialogButtonBox>
++#include <QLabel>
++#include <QMenu>
++#include <QPushButton>
++#include <QScrollBar>
++
++#include "test/mixxxtest.h"
++#include "util/windowgeometry.h"
++
++class Rx3WindowGeometryTest : public MixxxTest {};
++
++TEST_F(Rx3WindowGeometryTest, BoundsRespectWorkAreaAndNegativeScreenOrigins) {
++    for (const QRect available : {QRect(0, 24, 1280, 696), QRect(-1920, 0, 1920, 1040),
++                 QRect(1920, -900, 1600, 860)}) {
++        for (const QRect frame : {QRect(-5000, -3000, 1280, 800), QRect(5000, 4000, 400, 300),
++                     QRect(0, 0, 3000, 2000)}) {
++            const auto fitted = nautic::windowRectWithinScreen(frame, available);
++            EXPECT_TRUE(available.contains(fitted));
++            EXPECT_EQ(frame.size().boundedTo(available.size()), fitted.size());
++        }
++        const QRect fitting(available.topLeft() + QPoint(20, 30), QSize(300, 200));
++        EXPECT_EQ(fitting, nautic::windowRectWithinScreen(fitting, available));
++    }
++}
++
++TEST_F(Rx3WindowGeometryTest, FixedWindowIncludesItsDecorationWhenFitted) {
++    QWidget window;
++    window.setFixedSize(1280, 800);
++    window.move(2000, 2000); window.show();
++    QCoreApplication::processEvents();
++    const QRect available(0, 24, 1024, 576);
++    nautic::WindowGeometryGuard::fit(&window, available);
++    QCoreApplication::processEvents();
++    EXPECT_TRUE(available.contains(window.frameGeometry()));
++    EXPECT_EQ(window.minimumSize(), window.maximumSize());
++}
++
++TEST_F(Rx3WindowGeometryTest, OversizedDialogScrollsToItsButtonsAndKeepsAcceptanceWorking) {
++    QDialog dialog;
++    auto* layout = new QVBoxLayout(&dialog);
++    layout->addWidget(new QLabel("Settings", &dialog));
++    auto* content = new QWidget(&dialog); content->setMinimumSize(900, 1000);
++    layout->addWidget(content);
++    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
++    layout->addWidget(buttons);
++    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
++    dialog.show(); QCoreApplication::processEvents();
++    const QRect available(0, 20, 800, 460);
++    nautic::WindowGeometryGuard::fit(&dialog, available);
++    QCoreApplication::processEvents();
++    EXPECT_TRUE(available.contains(dialog.frameGeometry()));
++    auto* scroll = dialog.findChild<QScrollArea*>("NauticWindowScroll");
++    ASSERT_TRUE(scroll);
++    ASSERT_GT(scroll->verticalScrollBar()->maximum(), 0);
++    auto* acceptButton = buttons->button(QDialogButtonBox::Ok);
++    scroll->ensureWidgetVisible(acceptButton);
++    QCoreApplication::processEvents();
++    EXPECT_GT(scroll->verticalScrollBar()->value(), 0);
++    EXPECT_TRUE(scroll->viewport()->rect().contains(
++            acceptButton->mapTo(scroll->viewport(), acceptButton->rect().center())));
++    QSignalSpy accepted(&dialog, &QDialog::accepted);
++    QTest::mouseClick(acceptButton, Qt::LeftButton);
++    EXPECT_EQ(1, accepted.count());
++}
++
++TEST_F(Rx3WindowGeometryTest, GlobalGuardCorrectsShownAndMovedWindows) {
++    nautic::WindowGeometryGuard guard;
++    QWidget window;
++    window.resize(2000, 1400); window.move(-5000, -5000); window.show();
++    const auto available = window.screen()->availableGeometry();
++    QTRY_VERIFY(available.contains(window.frameGeometry()));
++    window.move(5000, 5000);
++    QTRY_VERIFY(available.contains(window.frameGeometry()));
++}
++
++TEST_F(Rx3WindowGeometryTest, MenusAndMaximizedWindowsKeepPlatformPlacement) {
++    QMenu menu; menu.addAction("Preset");
++    const auto before = menu.geometry();
++    nautic::WindowGeometryGuard::fit(&menu, QRect(0, 0, 100, 100));
++    EXPECT_EQ(before, menu.geometry());
++    QWidget window; window.showMaximized();
++    QCoreApplication::processEvents();
++    EXPECT_FALSE(nautic::WindowGeometryGuard::manages(&window));
++    window.showFullScreen(); QCoreApplication::processEvents();
++    EXPECT_FALSE(nautic::WindowGeometryGuard::manages(&window));
++}
+diff --git a/src/mixxxmainwindow.cpp b/src/mixxxmainwindow.cpp
+--- a/src/mixxxmainwindow.cpp
++++ b/src/mixxxmainwindow.cpp
+@@ -57,6 +57,7 @@
+ #include "util/scopedoverridecursor.h"
+ #include "util/timer.h"
+ #include "util/versionstore.h"
++#include "util/windowgeometry.h"
+ #include "version.h"
+ #include "waveform/guitick.h"
+ #include "waveform/sharedglcontext.h"
+@@ -654,6 +655,7 @@
+ }
+
+ void MixxxMainWindow::initializeWindow() {
++    new nautic::WindowGeometryGuard(this);
+     // be sure createMenuBar() is called first
+     DEBUG_ASSERT(m_pMenuBar);
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2148,6 +2148,7 @@
+     src/test/rx3temporange_test.cpp
+     src/test/rx3browserload_test.cpp
+     src/test/rx3beatfx_test.cpp
++    src/test/windowgeometry_test.cpp
+     src/test/soundreconfiguration_test.cpp
+     src/test/analyserwaveformtest.cpp
+     src/test/analyzersilence_test.cpp

@@ -632,22 +632,22 @@
             </control>
             <control>
                 <group>[QuickEffectRack1_[Channel1]]</group>
-                <key>super1</key>
-                <description>FILTER CH1 - rotate - Filter Effect Knob</description>
+                <key>PioneerDDJFLX4.cfxKnobMSB</key>
+                <description>FILTER CH1 - rotate - Filter / Smart CFX Knob</description>
                 <status>0xB6</status>
                 <midino>0x17</midino>
                 <options>
-                    <fourteen-bit-msb />
+                    <script-binding />
                 </options>
             </control>
             <control>
                 <group>[QuickEffectRack1_[Channel2]]</group>
-                <key>super1</key>
-                <description>FILTER CH2 - rotate - Filter Effect Knob</description>
+                <key>PioneerDDJFLX4.cfxKnobMSB</key>
+                <description>FILTER CH2 - rotate - Filter / Smart CFX Knob</description>
                 <status>0xB6</status>
                 <midino>0x18</midino>
                 <options>
-                    <fourteen-bit-msb />
+                    <script-binding />
                 </options>
             </control>
             <control>
@@ -1496,22 +1496,22 @@
             </control>
             <control>
                 <group>[QuickEffectRack1_[Channel1]]</group>
-                <key>super1</key>
-                <description>FILTER CH1 - rotate - Filter Effect Knob</description>
+                <key>PioneerDDJFLX4.cfxKnobLSB</key>
+                <description>FILTER CH1 - rotate - Filter / Smart CFX Knob</description>
                 <status>0xB6</status>
                 <midino>0x37</midino>
                 <options>
-                    <fourteen-bit-lsb />
+                    <script-binding />
                 </options>
             </control>
             <control>
                 <group>[QuickEffectRack1_[Channel2]]</group>
-                <key>super1</key>
-                <description>FILTER CH2 - rotate - Filter Effect Knob</description>
+                <key>PioneerDDJFLX4.cfxKnobLSB</key>
+                <description>FILTER CH2 - rotate - Filter / Smart CFX Knob</description>
                 <status>0xB6</status>
                 <midino>0x38</midino>
                 <options>
-                    <fourteen-bit-lsb />
+                    <script-binding />
                 </options>
             </control>
             <control>
@@ -2204,6 +2204,26 @@
                 <description>KEY SHIFT MODE (DECK2) - press - set key shift mode</description>
                 <status>0x91</status>
                 <midino>0x6F</midino>
+                <options>
+                    <script-binding />
+                </options>
+            </control>
+            <control>
+                <group>[RX3SmartFx]</group>
+                <key>PioneerDDJFLX4.smartFxPressed</key>
+                <description>SMART CFX - toggle</description>
+                <status>0x96</status>
+                <midino>0x00</midino>
+                <options>
+                    <script-binding />
+                </options>
+            </control>
+            <control>
+                <group>[RX3SmartFx]</group>
+                <key>PioneerDDJFLX4.smartFxPresetPressed</key>
+                <description>SHIFT + SMART CFX - select preset</description>
+                <status>0x96</status>
+                <midino>0x08</midino>
                 <options>
                     <script-binding />
                 </options>

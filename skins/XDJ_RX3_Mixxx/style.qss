@@ -3264,6 +3264,15 @@ QPushButton[rx3Bank="true"]:disabled { color: #777; }
 /* Touch navigation between PERFORMANCE and BROWSER. */
 #RX3OpenBrowser { background: #202020; color: #ddd; border: 1px solid #555; font-size: 14px; padding: 0; }
 #RX3OpenBrowser:pressed { background: #007ce0; color: #fff; }
+
+/* Compact, persistent Smart CFX status between transport and browser. */
+#RX3SmartFxBadge { background: #181818; border: 1px solid #444; padding: 0; qproperty-layoutSpacing: 0; }
+#RX3SmartFxStatus, #RX3SmartFxPreset { background: transparent; color: #aaa; border: 0; padding: 0; font-size: 12px; font-weight: normal; }
+#RX3SmartFxStatus { border-right: 1px solid #444; }
+#RX3SmartFxStatus[displayValue="1"] { background: #12303b; color: #53d4ff; }
+#RX3SmartFxPreset { color: #ddd; }
+#RX3SmartFxStatus[hover="true"], #RX3SmartFxPreset[hover="true"] { background: #303030; color: #fff; }
+#RX3SmartFxStatus:pressed, #RX3SmartFxPreset:pressed { background: #007ce0; color: #fff; }
 #RX3BrowserHeader #RX3BrowserLoad1, #RX3BrowserHeader #RX3BrowserLoad2 { border: 1px solid #008baa; }
 #RX3BrowserHeader #RX3BrowserLoad1:disabled, #RX3BrowserHeader #RX3BrowserLoad2:disabled { border-color: #444; color: #777; }
 #RX3BrowserHeader #RX3BrowserPerformance { border: 1px solid #777; }

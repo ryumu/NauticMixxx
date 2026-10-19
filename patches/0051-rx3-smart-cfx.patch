@@ -1,0 +1,482 @@
+diff --git a/src/widget/wrx3smartfx.h b/src/widget/wrx3smartfx.h
+new file mode 100644
+--- /dev/null
++++ b/src/widget/wrx3smartfx.h
+@@ -0,0 +1,212 @@
++#pragma once
++
++#include <QComboBox>
++#include <QDialog>
++#include <QLabel>
++#include <QPointer>
++#include <QPushButton>
++#include <QVBoxLayout>
++#include <array>
++#include <cmath>
++#include <vector>
++
++#include "control/controlobject.h"
++#include "control/controlproxy.h"
++#include "effects/effectchain.h"
++#include "effects/effectsmanager.h"
++#include "effects/presets/effectchainpreset.h"
++#include "effects/presets/effectpreset.h"
++#include "widget/rx3beatfxeffects.h"
++
++// Nautic combinations of built-in DSP, following the FLX4 Smart CFX controls.
++// These are not reproductions of rekordbox's proprietary preset algorithms.
++class WRx3SmartFx : public QObject {
++  public:
++    WRx3SmartFx(UserSettingsPointer config, EffectsManager* effects, QWidget* parent)
++            : QObject(parent), m_config(config), m_effects(effects), m_parent(parent) {
++        m_preset = qBound(0, config->getValue(ConfigKey(group(), "preset"), 0), 2);
++        addControl("enabled", 0, [this](double value) { setEnabled(value > 0); });
++        addControl("preset", m_preset, [this](double value) {
++            if (!std::isfinite(value) || value < 0 || value > 2) return;
++            const int preset = qRound(value);
++            if (m_preset == preset) return;
++            m_preset = preset;
++            m_config->setValue(ConfigKey(group(), "preset"), preset);
++            if (m_active) loadPreset();
++            if (m_selector) m_selector->setCurrentIndex(preset);
++        });
++        addControl("knob1", 0.5, [this](double value) { setKnob(0, value); });
++        addControl("knob2", 0.5, [this](double value) { setKnob(1, value); });
++        addControl("preset_open", 0, [this](double value) { if (value > 0) showPresets(); });
++        addControl("available", effects ? 1 : 0, [](double) {});
++    }
++    ~WRx3SmartFx() override {
++        setEnabled(false);
++        delete m_dialog.data();
++    }
++    static QString group() { return QStringLiteral("[RX3SmartFx]"); }
++    static QString quickGroup(int deck) {
++        return QString("[QuickEffectRack1_[Channel%1]]").arg(deck + 1);
++    }
++
++  private:
++    struct SavedChain {
++        EffectChainPointer chain;
++        EffectChainPresetPointer preset;
++        double mix = 1;
++        double enabled = 1;
++        std::array<double, 3> slotEnabled{};
++    };
++    void addControl(const QString& key, double initial, std::function<void(double)> callback) {
++        const ConfigKey configKey(group(), key);
++        // Skin bindings may create the controls before the native FX panel.
++        // Reuse those objects so the badge and controller share the same state.
++        if (!ControlObject::exists(configKey))
++            m_controls.push_back(std::make_unique<ControlObject>(configKey));
++        ControlObject::set(configKey, initial);
++        auto* proxy = new ControlProxy(configKey, this);
++        proxy->connectValueChanged(this, std::move(callback));
++    }
++    void setEnabled(bool enabled) {
++        if (enabled == m_active) return;
++        if (enabled) {
++            // Validate everything before changing either channel.
++            if (!m_effects || !manifest("filter") ||
++                    (m_preset != 2 && !manifest(m_preset == 0 ? "echo" : "reverb"))) {
++                ControlObject::set(ConfigKey(group(), "enabled"), 0);
++                return;
++            }
++            for (int deck = 0; deck < 2; ++deck) {
++                m_saved[deck].chain = m_effects->getEffectChain(quickGroup(deck));
++                if (!m_saved[deck].chain) {
++                    ControlObject::set(ConfigKey(group(), "enabled"), 0);
++                    return;
++                }
++            }
++            for (auto& saved : m_saved) {
++                saved.preset = EffectChainPresetPointer::create(saved.chain.data());
++                saved.mix = ControlObject::get(ConfigKey(saved.chain->group(), "mix"));
++                saved.enabled = ControlObject::get(ConfigKey(saved.chain->group(), "enabled"));
++                for (int index = 0; index < 3; ++index)
++                    saved.slotEnabled[index] = ControlObject::get(
++                            ConfigKey(saved.chain->getEffectSlot(index)->getGroup(), "enabled"));
++            }
++            m_active = true;
++            loadPreset();
++        } else {
++            m_active = false;
++            for (auto& saved : m_saved) {
++                if (!saved.preset) continue;
++                ControlObject::set(ConfigKey(saved.chain->group(), "enabled"), 0);
++                saved.chain->loadChainPreset(saved.preset);
++                for (int index = 0; index < 3; ++index) {
++                    const auto slot = saved.chain->getEffectSlot(index);
++                    const auto preset = saved.preset->effectPresets().at(index);
++                    // QuickEffectChain forces super1 on load. Restore values
++                    // edited independently of the linked metaknobs as well.
++                    slot->setMetaParameter(preset->metaParameter(), true);
++                    for (const auto& parameter : preset->getParameterPresets())
++                        rx3SetFxParameter(slot, parameter.id(), parameter.value());
++                    ControlObject::set(ConfigKey(slot->getGroup(), "enabled"), saved.slotEnabled[index]);
++                }
++                ControlObject::set(ConfigKey(saved.chain->group(), "mix"), saved.mix);
++                ControlObject::set(ConfigKey(saved.chain->group(), "enabled"), saved.enabled);
++                saved.preset.clear();
++            }
++        }
++        if (m_toggle) m_toggle->setChecked(m_active);
++    }
++    EffectManifestPointer manifest(const QString& name) const {
++        return m_effects->getBackendManager()->getManifestFromUniqueId("org.mixxx.effects." + name);
++    }
++    void loadPreset() {
++        // Construct from manifests, independent of installed preset list order
++        // and user-modified effect defaults.
++        QDomDocument doc;
++        auto preset = EffectChainPresetPointer::create(manifest("filter"));
++        preset->setName(m_preset == 2 ? "SMART CFX: FILTER" :
++                (m_preset == 0 ? "SMART CFX: ECHO + FILTER" : "SMART CFX: REVERB + FILTER"));
++        auto root = preset->toXml(&doc);
++        if (m_preset != 2)
++            root.firstChildElement("Effects").appendChild(
++                    EffectPreset(manifest(m_preset == 0 ? "echo" : "reverb")).toXml(&doc));
++        preset = EffectChainPresetPointer::create(root);
++        for (int deck = 0; deck < 2; ++deck) {
++            auto chain = m_saved[deck].chain;
++            ControlObject::set(ConfigKey(chain->group(), "enabled"), 0);
++            chain->loadChainPreset(preset);
++            ControlObject::set(ConfigKey(chain->group(), "mix"), 1);
++            rx3SetBeatFxEnabled(chain->getEffectSlot(0), true);
++            rx3SetBeatFxEnabled(chain->getEffectSlot(1), m_preset != 2);
++            rx3SetBeatFxEnabled(chain->getEffectSlot(2), false);
++            const auto space = chain->getEffectSlot(1);
++            rx3SetFxParameter(space, "delay_time", 0.5);
++            rx3SetFxParameter(space, "quantize", 1);
++            rx3SetFxParameter(space, "triplet", 0);
++            rx3SetFxParameter(space, "pingpong_amount", 0);
++            rx3SetFxParameter(space, "bandwidth", 1);
++            applyKnob(deck);
++        }
++    }
++    void setKnob(int deck, double value) {
++        if (!std::isfinite(value)) return;
++        m_knobs[deck] = qBound(0.0, value, 1.0);
++        if (m_active) applyKnob(deck);
++    }
++    void applyKnob(int deck) {
++        auto chain = m_saved[deck].chain;
++        const double position = m_knobs[deck];
++        // The center detent can report either adjacent MIDI step.
++        const double amount = qBound(0.0, (std::abs(position - 0.5) - 0.005) / 0.495, 1.0);
++        const auto filter = chain->getEffectSlot(0);
++        const auto space = chain->getEffectSlot(1);
++        rx3SetFxParameter(filter, "lpf", position < 0.5 ? 22050 * std::pow(200.0 / 22050, amount) : 22050);
++        rx3SetFxParameter(filter, "hpf", position > 0.5 ? 13 * std::pow(4000.0 / 13, amount) : 13);
++        if (m_preset != 2) {
++            rx3SetFxParameter(space, "send_amount", 0.65 * amount);
++            rx3SetFxParameter(space, "feedback_amount", 0.25 + 0.45 * amount);
++            rx3SetFxParameter(space, "decay", 0.3 + 0.5 * amount);
++        }
++        ControlObject::set(ConfigKey(chain->group(), "enabled"), amount > 0 ? 1 : 0);
++    }
++    void showPresets() {
++        if (!m_dialog) {
++            m_dialog = new QDialog(m_parent->window());
++            m_dialog->setObjectName("RX3SmartFxPresets");
++            m_dialog->setWindowTitle("SMART CFX");
++            m_dialog->setAttribute(Qt::WA_DeleteOnClose);
++            auto* layout = new QVBoxLayout(m_dialog);
++            layout->addWidget(new QLabel("SMART CFX PRESET", m_dialog));
++            m_selector = new QComboBox(m_dialog);
++            m_selector->setObjectName("RX3SmartFxPresetSelector");
++            m_selector->addItems({"ECHO + FILTER", "REVERB + FILTER", "FILTER"});
++            m_selector->setCurrentIndex(m_preset);
++            layout->addWidget(m_selector);
++            connect(m_selector, &QComboBox::currentIndexChanged, this, [](int index) {
++                ControlObject::set(ConfigKey(group(), "preset"), index);
++            });
++            m_toggle = new QPushButton("SMART CFX ON", m_dialog);
++            m_toggle->setCheckable(true);
++            m_toggle->setChecked(m_active);
++            layout->addWidget(m_toggle);
++            connect(m_toggle, &QPushButton::clicked, this, [](bool checked) {
++                ControlObject::set(ConfigKey(group(), "enabled"), checked ? 1 : 0);
++            });
++            layout->addWidget(new QLabel("Turn CFX to apply. Center returns to the original sound.", m_dialog));
++        }
++        m_dialog->show();
++        m_dialog->raise();
++        m_dialog->activateWindow();
++    }
++    UserSettingsPointer m_config;
++    EffectsManager* m_effects;
++    QWidget* m_parent;
++    bool m_active = false;
++    int m_preset = 0;
++    std::array<double, 2> m_knobs{{0.5, 0.5}};
++    std::array<SavedChain, 2> m_saved;
++    std::vector<std::unique_ptr<ControlObject>> m_controls;
++    QPointer<QDialog> m_dialog;
++    QPointer<QComboBox> m_selector;
++    QPointer<QPushButton> m_toggle;
++};
+diff --git a/src/widget/wrx3beatfx.h b/src/widget/wrx3beatfx.h
+--- a/src/widget/wrx3beatfx.h
++++ b/src/widget/wrx3beatfx.h
+@@ -31,6 +31,7 @@
+ #include "widget/wlabel.h"
+ #include "widget/rx3displayformat.h"
+ #include "widget/rx3beatfxeffects.h"
++#include "widget/wrx3smartfx.h"
+
+ // Absolute horizontal position, including touch input, rather than QSlider's
+ // page-step clicks. The engine retains responsibility for effect quantization.
+@@ -225,6 +226,8 @@
+     WRx3BeatFx(UserSettingsPointer config, EffectsManager* effects, QWidget* parent)
+             : QWidget(parent), m_config(config), m_effects(effects) {
+         setObjectName("RX3BeatFxControls");
++        if (!ControlObject::exists(ConfigKey(WRx3SmartFx::group(), "available")))
++            new WRx3SmartFx(config, effects, this);
+         auto* row = new QHBoxLayout(this);
+         row->setContentsMargins(0, 0, 0, 0);
+         row->setSpacing(12);
+diff --git a/src/test/rx3beatfx_test.cpp b/src/test/rx3beatfx_test.cpp
+--- a/src/test/rx3beatfx_test.cpp
++++ b/src/test/rx3beatfx_test.cpp
+@@ -13,6 +13,10 @@
+ #include "widget/wrx3beatfx.h"
+ #include "widget/weffectselector.h"
+ #include "skin/legacy/skincontext.h"
++#include "skin/legacy/legacyskinparser.h"
++#include "controllers/controllermanager.h"
++#include "controllers/keyboard/keyboardeventfilter.h"
++#include "widget/wpushbutton.h"
+ #include "widget/wwidgetgroup.h"
+ #include "widget/wnumber.h"
+
+@@ -98,6 +102,230 @@
+     std::unique_ptr<EffectsManager> effects;
+     EffectSlotPointer slot;
+ };
++
++class Rx3SmartFxTest : public Rx3BeatFxTest {
++  protected:
++    void SetUp() override {
++        Rx3BeatFxTest::SetUp();
++        for (int deck = 1; deck <= 2; ++deck) {
++            const QString group = QString("[Channel%1]").arg(deck);
++            effects->addDeck(ChannelHandleAndGroup(factory->getOrCreateHandle(group), group));
++        }
++    }
++    void set(const QString& key, double value) {
++        ControlObject::set(ConfigKey(WRx3SmartFx::group(), key), value);
++    }
++    EffectChainPointer quick(int deck) {
++        return effects->getEffectChain(WRx3SmartFx::quickGroup(deck));
++    }
++};
++
++TEST_F(Rx3SmartFxTest, SkinBadgeSharesControlsAndOpensPresetsOnRepeatedClicks) {
++    const QString skinDir = qEnvironmentVariable("NAUTIC_SKIN_DIR");
++    if (skinDir.isEmpty()) GTEST_SKIP() << "Set NAUTIC_SKIN_DIR for actual skin bindings";
++    QFile topbar(QDir(skinDir).filePath("topbar.xml"));
++    ASSERT_TRUE(topbar.open(QIODevice::ReadOnly));
++    QDomDocument source;
++    ASSERT_TRUE(source.setContent(topbar.readAll()));
++    QDomElement badge;
++    const auto groups = source.elementsByTagName("WidgetGroup");
++    for (int index = 0; index < groups.size(); ++index) {
++        const auto group = groups.at(index).toElement();
++        if (group.firstChildElement("ObjectName").text() == "RX3SmartFxBadge") badge = group;
++    }
++    ASSERT_FALSE(badge.isNull());
++    QTemporaryDir directory;
++    QDomDocument skin;
++    auto root = skin.createElement("skin"); skin.appendChild(root);
++    auto layout = skin.createElement("Layout");
++    layout.appendChild(skin.createTextNode("horizontal")); root.appendChild(layout);
++    auto children = skin.createElement("Children"); root.appendChild(children);
++    children.appendChild(skin.importNode(badge, true));
++    QFile definition(directory.filePath("skin.xml"));
++    ASSERT_TRUE(definition.open(QIODevice::WriteOnly));
++    definition.write(skin.toByteArray()); definition.close();
++    QWidget parent;
++    QSet<ControlObject*> skinControls;
++    ConfigObject<ConfigValueKbd> keyboardConfig(directory.filePath("keyboard.cfg"));
++    KeyboardEventFilter keyboard(&keyboardConfig);
++    ControllerManager controllers(config());
++    LegacySkinParser parser(config(), &skinControls, &keyboard, nullptr, &controllers,
++            nullptr, nullptr, effects.get(), nullptr);
++    auto* canvas = parser.parseSkin(directory.path(), &parent);
++    ASSERT_TRUE(canvas);
++    {
++        auto* original = ControlObject::getControl(ConfigKey(WRx3SmartFx::group(), "preset"));
++        WRx3SmartFx smart(config(), effects.get(), canvas);
++        EXPECT_EQ(original, ControlObject::getControl(ConfigKey(WRx3SmartFx::group(), "preset")));
++        canvas->show(); parent.show(); QCoreApplication::processEvents();
++        auto* status = canvas->findChild<WPushButton*>("RX3SmartFxStatus");
++        auto* preset = canvas->findChild<WPushButton*>("RX3SmartFxPreset");
++        ASSERT_TRUE(status); ASSERT_TRUE(preset);
++        EXPECT_EQ(0, status->readDisplayValue());
++        set("enabled", 1);
++        QTRY_COMPARE(status->readDisplayValue(), 1);
++        for (auto* button : {preset, status, preset}) {
++            QTest::mouseClick(button, Qt::LeftButton);
++            QCoreApplication::processEvents();
++            auto* dialog = parent.findChild<QDialog*>("RX3SmartFxPresets");
++            ASSERT_TRUE(dialog);
++            EXPECT_TRUE(dialog->isVisible());
++            EXPECT_DOUBLE_EQ(0, ControlObject::get(ConfigKey(WRx3SmartFx::group(), "preset_open")));
++            dialog->findChild<QComboBox*>()->setCurrentIndex(2);
++            QTRY_COMPARE(preset->readDisplayValue(), 2);
++            EXPECT_EQ(1, status->readDisplayValue());
++            dialog->hide();
++        }
++        set("enabled", 0);
++        QTRY_COMPARE(status->readDisplayValue(), 0);
++    }
++    delete canvas;
++    qDeleteAll(skinControls);
++}
++
++TEST_F(Rx3SmartFxTest, KnobsAreIndependentCenteredAndDoNotChangeBeatFxOrTransport) {
++    QWidget parent;
++    WRx3BeatFx panel(config(), effects.get(), &parent);
++    load("org.mixxx.effects.flanger");
++    ControlObject::set(ConfigKey(WRx3BeatFx::unitGroup(), "enabled"), 1);
++    const auto before = quick(0)->getEffectSlot(0)->id();
++    set("knob1", 0.25);
++    EXPECT_EQ(before, quick(0)->getEffectSlot(0)->id());
++    set("enabled", 1);
++    EXPECT_EQ("org.mixxx.effects.filter", quick(0)->getEffectSlot(0)->id());
++    EXPECT_EQ("org.mixxx.effects.echo", quick(0)->getEffectSlot(1)->id());
++    EXPECT_LT(rx3FxParameter(quick(0)->getEffectSlot(0), "lpf")->getValue(), 22050);
++    EXPECT_DOUBLE_EQ(13, rx3FxParameter(quick(0)->getEffectSlot(0), "hpf")->getValue());
++    EXPECT_GT(rx3FxParameter(quick(0)->getEffectSlot(1), "send_amount")->getValue(), 0);
++    EXPECT_DOUBLE_EQ(0, ControlObject::get(ConfigKey(quick(1)->group(), "enabled")));
++    set("knob2", 0.9);
++    EXPECT_GT(rx3FxParameter(quick(1)->getEffectSlot(0), "hpf")->getValue(), 13);
++    EXPECT_DOUBLE_EQ(22050, rx3FxParameter(quick(1)->getEffectSlot(0), "lpf")->getValue());
++    for (double center : {0.5, 8191.0 / 16383, 8192.0 / 16383, 64.0 / 127}) {
++        set("knob1", center);
++        EXPECT_DOUBLE_EQ(0, rx3FxParameter(quick(0)->getEffectSlot(1), "send_amount")->getValue());
++        EXPECT_DOUBLE_EQ(0, ControlObject::get(ConfigKey(quick(0)->group(), "enabled")));
++    }
++    EXPECT_EQ("org.mixxx.effects.flanger", slot->id());
++    EXPECT_DOUBLE_EQ(1, enabled());
++}
++
++TEST_F(Rx3SmartFxTest, DisableAndDestructionRestoreCompleteQuickEffectState) {
++    QWidget parent;
++    const auto chain = quick(0);
++    chain->loadChainPreset(EffectChainPresetPointer::create(
++            effects->getBackendManager()->getManifestFromUniqueId("org.mixxx.effects.echo")));
++    chain->setSuperParameter(0.3, true);
++    rx3SetFxParameter(chain->getEffectSlot(0), "feedback_amount", 0.43);
++    rx3SetFxParameter(chain->getEffectSlot(0), "send_amount", 0.17);
++    ControlObject::set(ConfigKey(chain->group(), "enabled"), 0);
++    ControlObject::set(ConfigKey(chain->group(), "mix"), 0.37);
++    rx3SetBeatFxEnabled(chain->getEffectSlot(0), false);
++    auto* panel = new WRx3BeatFx(config(), effects.get(), &parent);
++    for (bool destroy : {false, true}) {
++        set("enabled", 1);
++        set("knob1", 1);
++        set("preset", 1);
++        EXPECT_EQ("org.mixxx.effects.reverb", chain->getEffectSlot(1)->id());
++        if (destroy) delete panel;
++        else set("enabled", 0);
++        EXPECT_EQ("org.mixxx.effects.echo", chain->getEffectSlot(0)->id());
++        EXPECT_FALSE(chain->getEffectSlot(1)->isLoaded());
++        EXPECT_DOUBLE_EQ(0.43, rx3FxParameter(chain->getEffectSlot(0), "feedback_amount")->getValue());
++        EXPECT_DOUBLE_EQ(0.17, rx3FxParameter(chain->getEffectSlot(0), "send_amount")->getValue());
++        EXPECT_DOUBLE_EQ(0.3, chain->getSuperParameter());
++        EXPECT_DOUBLE_EQ(0, ControlObject::get(ConfigKey(chain->group(), "enabled")));
++        EXPECT_DOUBLE_EQ(0, ControlObject::get(ConfigKey(chain->getEffectSlot(0)->getGroup(), "enabled")));
++        EXPECT_DOUBLE_EQ(0.37, ControlObject::get(ConfigKey(chain->group(), "mix")));
++    }
++}
++
++TEST_F(Rx3SmartFxTest, PresetScreenSelectsWithoutEnablingAndPersistsSelection) {
++    QWidget parent;
++    {
++        WRx3BeatFx panel(config(), effects.get(), &parent);
++        set("preset_open", 1); set("preset_open", 0);
++        auto* dialog = parent.findChild<QDialog*>("RX3SmartFxPresets");
++        ASSERT_TRUE(dialog);
++        auto* selector = dialog->findChild<QComboBox*>("RX3SmartFxPresetSelector");
++        ASSERT_TRUE(selector);
++        EXPECT_EQ(3, selector->count());
++        EXPECT_EQ("FILTER", selector->itemText(2));
++        selector->setCurrentIndex(1);
++        EXPECT_DOUBLE_EQ(0, ControlObject::get(ConfigKey(WRx3SmartFx::group(), "enabled")));
++        set("enabled", 1);
++        EXPECT_EQ("org.mixxx.effects.reverb", quick(0)->getEffectSlot(1)->id());
++        EXPECT_EQ("org.mixxx.effects.reverb", quick(1)->getEffectSlot(1)->id());
++        selector->setCurrentIndex(2);
++        EXPECT_FALSE(quick(0)->getEffectSlot(1)->isLoaded());
++        EXPECT_FALSE(quick(1)->getEffectSlot(1)->isLoaded());
++        dialog->close();
++        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
++        EXPECT_DOUBLE_EQ(1, ControlObject::get(ConfigKey(WRx3SmartFx::group(), "enabled")));
++    }
++    WRx3BeatFx restored(config(), effects.get(), &parent);
++    EXPECT_DOUBLE_EQ(2, ControlObject::get(ConfigKey(WRx3SmartFx::group(), "preset")));
++    EXPECT_DOUBLE_EQ(0, ControlObject::get(ConfigKey(WRx3SmartFx::group(), "enabled")));
++}
++
++TEST_F(Rx3SmartFxTest, SelectedEchoActuallyProducesABeatSynchronizedTail) {
++    QWidget parent;
++    WRx3BeatFx panel(config(), effects.get(), &parent);
++    set("knob1", 1);
++    set("enabled", 1);
++    GroupFeatureState features;
++    features.beat_length = GroupFeatureBeatLength{0.5, 1};
++    const auto audio = renderFx<EchoEffect, EchoGroupState>(quick(0)->getEffectSlot(1),
++            48000, 36096, features, [](int frame) { return frame == 1024 ? 0.5 : 0.0; });
++    EXPECT_GT(std::abs(audio[2 * (1024 + 12000)]), 0.1);
++    for (auto value : audio) ASSERT_TRUE(std::isfinite(value));
++}
++
++TEST_F(Rx3SmartFxTest, FilterOnlyRendersLowPassOnMinusAndHighPassOnPlus) {
++    QWidget parent;
++    WRx3BeatFx panel(config(), effects.get(), &parent);
++    set("preset", 2);
++    set("enabled", 1);
++    for (int deck = 0; deck < 2; ++deck) {
++        const auto chain = quick(deck);
++        const auto filter = chain->getEffectSlot(0);
++        EXPECT_EQ("org.mixxx.effects.filter", filter->id());
++        EXPECT_FALSE(chain->getEffectSlot(1)->isLoaded());
++        EXPECT_FALSE(chain->getEffectSlot(2)->isLoaded());
++        const QString knob = QString("knob%1").arg(deck + 1);
++        for (double position : {0.0, 1.0}) {
++            set(knob, position);
++            EXPECT_DOUBLE_EQ(1, ControlObject::get(ConfigKey(chain->group(), "enabled")));
++            EXPECT_NEAR(position == 0 ? 200 : 22050,
++                    rx3FxParameter(filter, "lpf")->getValue(), 1e-6);
++            EXPECT_NEAR(position == 0 ? 13 : 4000,
++                    rx3FxParameter(filter, "hpf")->getValue(), 1e-6);
++            const auto energy = [&](double frequency) {
++                const auto audio = renderFx<FilterEffect, FilterGroupState>(filter,
++                        48000, 24064, {}, [frequency](int frame) {
++                            return 0.25 * std::sin(frame * 2 * 3.141592653589793 * frequency / 48000);
++                        });
++                double sum = 0;
++                for (size_t index = 8192; index < audio.size(); ++index) {
++                    EXPECT_TRUE(std::isfinite(audio[index]));
++                    sum += audio[index] * audio[index];
++                }
++                return sum;
++            };
++            const double low = energy(100);
++            const double high = energy(8000);
++            if (position == 0) {
++                EXPECT_GT(low, 20 * high);
++            } else {
++                EXPECT_GT(high, 20 * low);
++            }
++        }
++        set(knob, 0.5);
++        EXPECT_DOUBLE_EQ(0, ControlObject::get(ConfigKey(chain->group(), "enabled")));
++        EXPECT_DOUBLE_EQ(22050, rx3FxParameter(filter, "lpf")->getValue());
++        EXPECT_DOUBLE_EQ(13, rx3FxParameter(filter, "hpf")->getValue());
++    }
++}
+
+ TEST_F(Rx3BeatFxTest, FourRegistrationsPersistWithoutReplacingOccupiedSlots) {
+     QWidget parent;

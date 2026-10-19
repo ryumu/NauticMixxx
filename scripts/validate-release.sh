@@ -39,6 +39,7 @@ python3 scripts/test-rx3-controller-package.py
 node scripts/test-flx6-browser.js
 node scripts/test-flx4-browser.js
 node scripts/test-flx4-beatfx.js
+node scripts/test-flx4-smartfx.js
 python3 scripts/test-flx4-preset.py
 node scripts/test-pioneer-roland-browser.js
 python3 scripts/test-pioneer-roland-presets.py
