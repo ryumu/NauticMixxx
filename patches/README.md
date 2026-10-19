@@ -621,3 +621,11 @@ occupied endpoints, to avoid counting one extra pixel with Linux font substituti
   negative monitor coordinates and automatic correction after showing/moving.
 - On Wayland, maximize capped windows through the compositor to correct their
   position as well as their size; ordinary dialogs keep their original size.
+
+## 0054 — Recover the application menu without a keyboard
+
+- Expose the momentary `[Master],show_menubar` action from the main menu bar.
+  The PERFORMANCE topbar and BROWSE header provide APP MENU touch buttons.
+- Restore the menu without changing its auto-hide preference, browser page or
+  deck transport. Keep the browser's existing MENU / UTILITY action separate.
+- Verify repeated recovery through the actual skin button and browser button.

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add touch-accessible APP MENU buttons in PERFORMANCE and BROWSE to restore the hidden application menu bar without a keyboard, including on Raspberry Pi.
+
 - Fit application windows to the available screen area and keep oversized operation dialogs scrollable, including on smaller or scaled displays.
 
 - Keep the startup audio-output warning attached to the main window so an unconfigured output cannot leave the app waiting behind its launch screen.

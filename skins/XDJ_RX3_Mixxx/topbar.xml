@@ -91,6 +91,13 @@
         </Children>
       </WidgetGroup>
       <PushButton>
+        <ObjectName>RX3AppMenu</ObjectName><Size>88f,34f</Size><NumberStates>1</NumberStates>
+        <LeftClickIsPushButton>true</LeftClickIsPushButton>
+        <Tooltip>Show the application menu bar</Tooltip>
+        <State><Number>0</Number><Text>APP MENU</Text></State>
+        <Connection><ConfigKey>[Master],show_menubar</ConfigKey><ConnectValueToWidget>false</ConnectValueToWidget><EmitOnPressAndRelease>true</EmitOnPressAndRelease></Connection>
+      </PushButton>
+      <PushButton>
         <ObjectName>RX3OpenBrowser</ObjectName><Size>104f,34f</Size><NumberStates>1</NumberStates>
         <Tooltip>Browse tracks</Tooltip>
         <State><Number>0</Number><Text>BROWSE</Text></State>

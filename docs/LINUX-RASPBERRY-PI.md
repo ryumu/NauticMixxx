@@ -91,6 +91,11 @@ It uses the NauticMixxx icon, English by default and an isolated profile at
 are not migrated. Your saved choices are preserved on subsequent launches.
 You can use `NAUTICMIXXX_PROFILE=/another/path` for an isolated hardware test.
 
+For touch-only use, tap **APP MENU** in the PERFORMANCE topbar or at the right
+of the BROWSE header to show a hidden application menu bar. This also works in
+fullscreen and leaves the auto-hide preference enabled; no keyboard is needed.
+The browser's separate **MENU** button opens UTILITY.
+
 Optional desktop menu entry (keep the staged folder in its final location first):
 
 ```sh

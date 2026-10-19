@@ -1,5 +1,24 @@
 # NauticMixxx 2.0.0 test-candidate validation report
 
+## Touch-only application menu recovery — validation (2026-10-19)
+
+- Added APP MENU beside BROWSE in PERFORMANCE and at the right of the BROWSE
+  header. Both restore the application menu through `[Master],show_menubar`,
+  preserving the auto-hide setting, current page and deck transport.
+- Linux aarch64 application/test builds passed. All 19 focused native checks
+  passed: repeated recovery through the actual skin button and browser button,
+  existing browser load/navigation/layout checks, Smart CFX and window geometry.
+- Actual Wayland GUI checks passed for repeated hide/show in PERFORMANCE and
+  BROWSE, opening the restored File menu, and recovery while remaining fullscreen.
+  Inspected captures confirm both APP MENU buttons fit within the interface.
+- Patch 0054 applies after the existing 53-patch chain and reproduces all six
+  changed native paths. Windows identifier/installer and skin-package checks,
+  the public audit and Linux staged package checks passed. Physical touchscreen
+  input and native Windows/macOS runtime were not exercised.
+- Updated the desktop launcher target with the rebuilt binary and resources.
+  Restart an already running application to load this update.
+- Evidence: `build/test-candidate/2.0.0-linux-aarch64/validation/touch-menu/`.
+
 ## Fit application windows to the screen — validation (2026-10-19)
 
 - Patch 0053 fits ordinary application windows to the available screen area,

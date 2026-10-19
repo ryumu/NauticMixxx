@@ -1,0 +1,194 @@
+diff --git a/src/widget/wmainmenubar.h b/src/widget/wmainmenubar.h
+--- a/src/widget/wmainmenubar.h
++++ b/src/widget/wmainmenubar.h
+@@ -6,6 +6,7 @@
+ #include <QScopedPointer>
+
+ #include "control/controlproxy.h"
++#include "control/controlpushbutton.h"
+ #include "preferences/configobject.h"
+ #include "preferences/usersettings.h"
+
+@@ -112,4 +113,5 @@
+     ConfigObject<ConfigValueKbd>* m_pKbdConfig;
+     QList<QAction*> m_loadToDeckActions;
+     QList<QAction*> m_vinylControlEnabledActions;
++    ControlPushButton m_showMenuBar;
+ };
+diff --git a/src/widget/wmainmenubar.cpp b/src/widget/wmainmenubar.cpp
+--- a/src/widget/wmainmenubar.cpp
++++ b/src/widget/wmainmenubar.cpp
+@@ -78,9 +78,20 @@
+                            ConfigObject<ConfigValueKbd>* pKbdConfig)
+         : QMenuBar(pParent),
+           m_pConfig(pConfig),
+-          m_pKbdConfig(pKbdConfig) {
++          m_pKbdConfig(pKbdConfig),
++          m_showMenuBar(ConfigKey("[Master]", "show_menubar")) {
+     setObjectName(QStringLiteral("MainMenu"));
+     initialize();
++    connect(&m_showMenuBar, &ControlObject::valueChanged, this, [this](double value) {
++        if (value <= 0) return;
++#ifndef __APPLE__
++        // Keep auto-hide enabled, but allow touch-only systems to recover the
++        // application menu without an Alt key or changing their preferences.
++        showMenuBar();
++#else
++        show();
++#endif
++    });
+ }
+
+ void WMainMenuBar::initialize() {
+diff --git a/src/widget/wrx3browser.h b/src/widget/wrx3browser.h
+--- a/src/widget/wrx3browser.h
++++ b/src/widget/wrx3browser.h
+@@ -190,6 +190,15 @@
+         performance->setAccessibleName("Return to performance screen");
+         performance->setToolTip("Return to performance screen");
+         performance->setFocusPolicy(Qt::NoFocus);
++        auto* appMenu = addHeader("APP MENU", "RX3BrowserAppMenu", [] {
++            const ConfigKey key("[Master]", "show_menubar");
++            if (!ControlObject::exists(key)) return;
++            ControlObject::set(key, 1);
++            ControlObject::set(key, 0);
++        });
++        appMenu->setToolTip("Show the application menu bar");
++        appMenu->setAccessibleName("Show application menu");
++        appMenu->setFocusPolicy(Qt::NoFocus);
+         layout->addWidget(header);
+         m_pages = new QStackedWidget(this); layout->addWidget(m_pages, 1);
+         auto* browse = new QWidget(m_pages); auto* b = new QHBoxLayout(browse);
+diff --git a/src/test/rx3touchmenu_test.cpp b/src/test/rx3touchmenu_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/test/rx3touchmenu_test.cpp
+@@ -0,0 +1,72 @@
++#include <QtTest>
++#include <QDomDocument>
++#include <QVBoxLayout>
++
++#include "controllers/controllermanager.h"
++#include "controllers/keyboard/keyboardeventfilter.h"
++#include "skin/legacy/legacyskinparser.h"
++#include "test/mixxxtest.h"
++#include "widget/wmainmenubar.h"
++#include "widget/wpushbutton.h"
++
++class Rx3TouchMenuTest : public MixxxTest {};
++
++TEST_F(Rx3TouchMenuTest, PerformanceButtonRecoversHiddenMenuRepeatedlyWithoutChangingAutoHide) {
++#ifdef __APPLE__
++    GTEST_SKIP() << "macOS manages the native menu bar";
++#else
++    const QString skinDir = qEnvironmentVariable("NAUTIC_SKIN_DIR");
++    if (skinDir.isEmpty()) GTEST_SKIP() << "Set NAUTIC_SKIN_DIR for actual skin bindings";
++    QFile source(QDir(skinDir).filePath("topbar.xml"));
++    ASSERT_TRUE(source.open(QIODevice::ReadOnly));
++    QDomDocument topbar;
++    ASSERT_TRUE(topbar.setContent(source.readAll()));
++    QDomElement button;
++    const auto buttons = topbar.elementsByTagName("PushButton");
++    for (int i = 0; i < buttons.size(); ++i) {
++        const auto candidate = buttons.at(i).toElement();
++        if (candidate.firstChildElement("ObjectName").text() == "RX3AppMenu") button = candidate;
++    }
++    ASSERT_FALSE(button.isNull());
++    QTemporaryDir directory;
++    QDomDocument skin;
++    auto root = skin.createElement("skin"); skin.appendChild(root);
++    auto skinLayout = skin.createElement("Layout");
++    skinLayout.appendChild(skin.createTextNode("horizontal")); root.appendChild(skinLayout);
++    auto children = skin.createElement("Children"); root.appendChild(children);
++    children.appendChild(skin.importNode(button, true));
++    QFile definition(directory.filePath("skin.xml"));
++    ASSERT_TRUE(definition.open(QIODevice::WriteOnly));
++    definition.write(skin.toByteArray()); definition.close();
++    ConfigObject<ConfigValueKbd> keyboardConfig(directory.filePath("keyboard.cfg"));
++    QWidget window;
++    auto* layout = new QVBoxLayout(&window);
++    WMainMenuBar menu(&window, config(), &keyboardConfig);
++    layout->addWidget(&menu);
++    QSet<ControlObject*> skinControls;
++    KeyboardEventFilter keyboard(&keyboardConfig);
++    ControllerManager controllers(config());
++    LegacySkinParser parser(config(), &skinControls, &keyboard, nullptr, &controllers,
++            nullptr, nullptr, nullptr, nullptr);
++    auto* canvas = parser.parseSkin(directory.path(), &window);
++    ASSERT_TRUE(canvas);
++    layout->addWidget(canvas);
++    auto* appMenu = canvas->findChild<WPushButton*>("RX3AppMenu");
++    ASSERT_TRUE(appMenu);
++    config()->setValue(ConfigKey("[Config]", "hide_menubar"), 1);
++    window.show();
++    for (int i = 0; i < 3; ++i) {
++        menu.hideMenuBar();
++        QCoreApplication::processEvents();
++        ASSERT_EQ(0, menu.height());
++        QTest::mouseClick(appMenu, Qt::LeftButton);
++        QCoreApplication::processEvents();
++        EXPECT_GT(menu.height(), 0);
++        EXPECT_EQ(0, ControlObject::get(ConfigKey("[Master]", "show_menubar")));
++        EXPECT_TRUE(config()->getValue<bool>(ConfigKey("[Config]", "hide_menubar"), false));
++    }
++    window.hide();
++    delete canvas;
++    qDeleteAll(skinControls);
++#endif
++}
+diff --git a/src/test/rx3browserload_test.cpp b/src/test/rx3browserload_test.cpp
+--- a/src/test/rx3browserload_test.cpp
++++ b/src/test/rx3browserload_test.cpp
+@@ -6,6 +6,7 @@
+ #include "control/controlpushbutton.h"
+ #include "test/mixxxtest.h"
+ #include "widget/wrx3browser.h"
++#include "widget/wmainmenubar.h"
+
+ // Use a selection-only table: row painting and SQL/provider projection are
+ // tested separately. The real hardware LOAD controls remain the boundary.
+@@ -208,3 +209,33 @@
+         }
+     }
+ }
++
++TEST_F(Rx3BrowserLoadTest, AppMenuButtonRecoversHiddenMenuWithoutLeavingBrowser) {
++#ifdef __APPLE__
++    GTEST_SKIP() << "macOS manages the native menu bar";
++#else
++    QTemporaryDir directory;
++    ConfigObject<ConfigValueKbd> keyboardConfig(directory.filePath("keyboard.cfg"));
++    QWidget host;
++    auto* layout = new QVBoxLayout(&host);
++    WMainMenuBar menu(&host, config(), &keyboardConfig);
++    layout->addWidget(&menu); layout->addStretch();
++    host.resize(640, 200); host.show();
++    config()->setValue(ConfigKey("[Config]", "hide_menubar"), 1);
++    auto* appMenu = button("RX3BrowserAppMenu");
++    ASSERT_TRUE(appMenu);
++    ASSERT_TRUE(appMenu->isVisible());
++    for (int i = 0; i < 3; ++i) {
++        menu.hideMenuBar();
++        QCoreApplication::processEvents();
++        ASSERT_EQ(0, menu.height());
++        QTest::mouseClick(appMenu, Qt::LeftButton);
++        QCoreApplication::processEvents();
++        EXPECT_GT(menu.height(), 0);
++        EXPECT_EQ(0, ControlObject::get(ConfigKey("[Master]", "show_menubar")));
++        EXPECT_TRUE(config()->getValue<bool>(ConfigKey("[Config]", "hide_menubar"), false));
++        EXPECT_EQ(1, tab->get());
++        EXPECT_FALSE(play[0]->get()); EXPECT_FALSE(play[1]->get());
++    }
++#endif
++}
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2149,6 +2149,7 @@
+     src/test/rx3browserload_test.cpp
+     src/test/rx3beatfx_test.cpp
+     src/test/windowgeometry_test.cpp
++    src/test/rx3touchmenu_test.cpp
+     src/test/soundreconfiguration_test.cpp
+     src/test/analyserwaveformtest.cpp
+     src/test/analyzersilence_test.cpp
