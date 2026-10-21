@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Project USB tracks off the GUI thread for LOAD, double-click, headphone touch preview and CONTINUE. Discard superseded or disconnected requests, recheck playing-deck protection, and prevent released previews from starting late.
+
 - Batch background USB analysis validation, yield to explicit track loads, and cancel between tracks on list changes. Reuse inspected metadata without rereading the PDB while retaining full validation for explicit loads and waveform payloads.
 
 - Reset ECHO delay history in constant time when disabling the effect, preserving silent restarts and delay/feedback behavior without clearing several MiB in the audio callback.

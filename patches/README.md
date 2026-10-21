@@ -1,5 +1,16 @@
 # NauticMixxx native patches
 
+## 0059 — Asynchronous USB track loading
+
+- Run selected-track analysis, waveform reads and temporary Track construction
+  on a worker for deck loading, double-click, touch preview and CONTINUE.
+- Deliver Track objects on the GUI thread, cancel superseded requests between
+  reads, and discard results for destroyed receivers or disconnected sessions.
+- Share deck request cancellation with CONTINUE, recheck playing-deck protection,
+  and keep preview release, movement and model-reset handling safe while loading.
+- Test GUI responsiveness with a paused worker, latest-request delivery, receiver
+  destruction, revocation, changed deck state and release before projection.
+
 ## 0058 — Bounded USB analysis prefetch
 
 - Verify PDB identity around batches of up to 16 tracks, with an eight-millisecond

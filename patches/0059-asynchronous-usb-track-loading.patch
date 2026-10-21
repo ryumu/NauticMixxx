@@ -1,0 +1,525 @@
+diff --git a/src/library/rekordbox/rekordboxfeature.h b/src/library/rekordbox/rekordboxfeature.h
+--- a/src/library/rekordbox/rekordboxfeature.h
++++ b/src/library/rekordbox/rekordboxfeature.h
+@@ -39,6 +39,10 @@
+     std::optional<mixxx::rekordbox::RuntimeTrack> infoForLocation(const QString& location,QString* root) const;
+     TrackPointer temporaryTrackForRoot(const QString& root,quint32 id,QString* error=nullptr) const {
+         const auto session=m_sessions.value(root);return session?session->createTemporaryTrack(id,error):TrackPointer();
++    }
++    void requestTemporaryTrackForRoot(const QString& root, quint32 id, QObject* context,
++            std::function<void(TrackPointer)> ready, const QString& requestKey = {}) const {
++        mixxx::rekordbox::RekordboxUsbSession::requestTemporaryTrack(m_sessions.value(root), id, context, std::move(ready), requestKey);
+     }
+     QString sessionIdentityForRoot(const QString& root) const {
+         const auto session=m_sessions.value(root);const auto state=session?session->sessionState():nullptr;
+diff --git a/src/library/rekordbox/rekordboxruntimetrackmodel.cpp b/src/library/rekordbox/rekordboxruntimetrackmodel.cpp
+--- a/src/library/rekordbox/rekordboxruntimetrackmodel.cpp
++++ b/src/library/rekordbox/rekordboxruntimetrackmodel.cpp
+@@ -202,6 +202,13 @@
+         qWarning() << "Cannot project Rekordbox USB track" << error;
+     }
+     return track;
++}
++
++void RekordboxRuntimeTrackModel::requestTrack(const QModelIndex& index, QObject* context,
++        std::function<void(TrackPointer)> ready, const QString& requestKey) const {
++    const auto* track = trackAt(index);
++    RekordboxUsbSession::requestTemporaryTrack(m_session, track ? track->rekordboxId : 0,
++            context, std::move(ready), requestKey);
+ }
+ 
+ TrackPointer RekordboxRuntimeTrackModel::getTrackByRef(
+diff --git a/src/library/rekordbox/rekordboxruntimetrackmodel.h b/src/library/rekordbox/rekordboxruntimetrackmodel.h
+--- a/src/library/rekordbox/rekordboxruntimetrackmodel.h
++++ b/src/library/rekordbox/rekordboxruntimetrackmodel.h
+@@ -8,6 +8,7 @@
+ 
+ #include <memory>
+ #include <atomic>
++#include <functional>
+ 
+ #include "library/basetracktablemodel.h"
+ #include "library/rekordbox/rekordboxruntimecatalog.h"
+@@ -40,6 +41,8 @@
+ 
+     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
+     TrackPointer getTrack(const QModelIndex& index) const override;
++    void requestTrack(const QModelIndex& index, QObject* context,
++            std::function<void(TrackPointer)> ready, const QString& requestKey = {}) const;
+     TrackPointer getTrackByRef(const TrackRef& trackRef) const override;
+     QUrl getTrackUrl(const QModelIndex& index) const override;
+     QString getTrackLocation(const QModelIndex& index) const override;
+diff --git a/src/library/rekordbox/rekordboxusbsession.cpp b/src/library/rekordbox/rekordboxusbsession.cpp
+--- a/src/library/rekordbox/rekordboxusbsession.cpp
++++ b/src/library/rekordbox/rekordboxusbsession.cpp
+@@ -6,6 +6,9 @@
+ #include <QFile>
+ #include <QDateTime>
+ #include <QElapsedTimer>
++#include <QCoreApplication>
++#include <QFutureWatcher>
++#include <QtConcurrentRun>
+ #include <QUuid>
+ #include <QSet>
+ #include <algorithm>
+@@ -17,6 +20,7 @@
+ #include "library/rekordbox/rekordboxperformancewriter.h"
+ #include "library/rekordbox/rekordboxplaylistwriter.h"
+ #include "library/rekordbox/rekordboxtrackadapter.h"
++#include "track/track.h"
+ 
+ namespace mixxx::rekordbox {
+ namespace {
+@@ -677,14 +681,17 @@
+     return m_sessionState;
+ }
+ TrackPointer RekordboxUsbSession::createTemporaryTrack(
+-        quint32 rekordboxId, QString* error) {
++        quint32 rekordboxId, QString* error,
++        std::shared_ptr<const std::atomic<bool>> cancelled) {
+     if (error) {
+         error->clear();
+     }
+     // Reuse background list inspection when available. The loader revalidates
+     // the PDB identity before reusing any cached analysis.
++    if (cancelled && cancelled->load()) return {};
+     const auto runtimeTrack = loadTrackAnalysis(rekordboxId, error);
+     if (!runtimeTrack) return {};
++    if (cancelled && cancelled->load()) return {};
+     std::shared_ptr<const SessionState> sessionState;
+     {
+         const std::lock_guard<std::mutex> lock(m_mutex);
+@@ -725,6 +732,7 @@
+     QList<LoadedRuntimeWaveform> loadedWaveforms;
+     QSet<QByteArray> loadedTags;
+     for (const auto& candidate : std::as_const(waveformCandidates)) {
++        if (cancelled && cancelled->load()) return {};
+         if (waveformPriority(candidate) >= 100) {
+             break;
+         }
+@@ -739,9 +747,42 @@
+                        << rekordboxId << waveformError;
+         }
+     }
++    if (cancelled && cancelled->load()) return {};
+     return RekordboxTrackAdapter::createTemporaryTrack(
+             *runtimeTrack, sessionState, std::move(loadedWaveforms), error);
+ }
++void RekordboxUsbSession::requestTemporaryTrack(std::shared_ptr<RekordboxUsbSession> session,
++        quint32 rekordboxId, QObject* context, std::function<void(TrackPointer)> ready,
++        const QString& requestKey) {
++    if (!context) return;
++    // Requests and completions run on the GUI thread. Share deck tickets with
++    // CONTINUE so its older pending load cannot replace a newer manual choice.
++    static QHash<QString, std::weak_ptr<std::atomic<bool>>> pendingRequests;
++    const auto cancelled = std::make_shared<std::atomic<bool>>(false);
++    if (!requestKey.isEmpty()) {
++        if (const auto previous = pendingRequests.value(requestKey).lock()) previous->store(true);
++        pendingRequests[requestKey] = cancelled;
++    }
++    auto* watcher = new QFutureWatcher<TrackPointer>(context);
++    QObject::connect(context, &QObject::destroyed, watcher, [cancelled] { cancelled->store(true); });
++    QObject::connect(watcher, &QFutureWatcher<TrackPointer>::finished, context,
++            [watcher, ready = std::move(ready), cancelled] {
++                auto track = watcher->result();
++                watcher->deleteLater();
++                if (cancelled->load()) return;
++                if (track && !track->isSourceAvailableForPlayback()) track.reset();
++                ready(std::move(track));
++            });
++    auto* guiThread = QCoreApplication::instance()->thread();
++    watcher->setFuture(QtConcurrent::run([session = std::move(session), rekordboxId, guiThread, cancelled] {
++        auto track = session ? session->createTemporaryTrack(rekordboxId, nullptr, cancelled) : TrackPointer();
++        // Like GlobalTrackCache, move newly created QObjects off the worker
++        // before delivery; pool threads have no event loop for Track slots.
++        if (track) track->moveToThread(guiThread);
++        return track;
++    }));
++}
++
+ QString RekordboxUsbSession::extendedDatabasePath() const {
+     const std::lock_guard<std::mutex> lock(m_mutex);
+     return m_extendedDatabasePath;
+diff --git a/src/library/rekordbox/rekordboxusbsession.h b/src/library/rekordbox/rekordboxusbsession.h
+--- a/src/library/rekordbox/rekordboxusbsession.h
++++ b/src/library/rekordbox/rekordboxusbsession.h
+@@ -3,11 +3,14 @@
+ #include <memory>
+ #include <mutex>
+ #include <atomic>
++#include <functional>
+ 
+ #include "library/rekordbox/rekordboxdevice.h"
+ #include "library/rekordbox/rekordboxruntimecatalog.h"
+ #include "library/rekordbox/rekordboxsessionstate.h"
+ #include "track/track_decl.h"
++
++class QObject;
+ 
+ namespace mixxx::rekordbox {
+ 
+@@ -65,7 +68,13 @@
+     // Projects only a track from this session's sealed catalog. The result is
+     // temporary, non-persistable, non-analyzable, and bound to this session.
+     TrackPointer createTemporaryTrack(
+-            quint32 rekordboxId, QString* error = nullptr);
++            quint32 rekordboxId, QString* error = nullptr,
++            std::shared_ptr<const std::atomic<bool>> cancelled = {});
++    // Capture session/ID on the GUI thread, project entirely on a worker and
++    // deliver on context's thread. Destroying context discards the completion.
++    static void requestTemporaryTrack(std::shared_ptr<RekordboxUsbSession> session,
++            quint32 rekordboxId, QObject* context, std::function<void(TrackPointer)> ready,
++            const QString& requestKey = {});
+     // Optional future input, never parsed as main PDB or required in Phase 2.
+     QString extendedDatabasePath() const;
+ 
+diff --git a/src/test/rekordboxusbsession_test.cpp b/src/test/rekordboxusbsession_test.cpp
+--- a/src/test/rekordboxusbsession_test.cpp
++++ b/src/test/rekordboxusbsession_test.cpp
+@@ -2218,3 +2218,121 @@
+     EXPECT_EQ(UsbSessionState::Invalidated, session.state());
+     EXPECT_EQ(0, session.prefetchTrackAnalyses(ids));
+ }
++
++TEST_F(RekordboxRuntimeTrackModelTest, AsyncLoadsKeepGuiResponsiveAndOnlyDeliverLatestDeckRequest) {
++    QTemporaryDir volume;
++    ASSERT_TRUE(write(pdb(volume), database({{0, track(1, "/Contents/1.mp3", "/PIONEER/USBANLZ/1.DAT")},
++            {0, track(2, "/Contents/2.mp3", "/PIONEER/USBANLZ/2.DAT")}})));
++    for (int id : {1, 2}) {
++        const auto owner = QString("/Contents/%1.mp3").arg(id);
++        ASSERT_TRUE(write(volume.path() + owner, "audio fixture"));
++        ASSERT_TRUE(write(volume.filePath(QString("PIONEER/USBANLZ/%1.DAT").arg(id)), syntheticCueAnlz(owner)));
++    }
++    auto session = std::make_shared<RekordboxUsbSession>(volume.path());
++    ASSERT_TRUE(session->load());
++    PausedBrowserPreviewReads paused;
++    RekordboxRuntimeTrackModel model(nullptr, trackCollectionManager());
++    model.showPlaylist(session, {1, 2}, 12);
++    ProxyTrackModel proxy(&model);
++    MetadataOnlyUsbTable table(config());
++    table.QTableView::setModel(&proxy);
++    QList<TrackPointer> delivered;
++    QObject::connect(&table, &WLibraryTableView::loadTrackToPlayer, &table,
++            [&](TrackPointer selected, const QString& group, bool play) {
++                EXPECT_EQ(QString("[Channel1]"), group);
++                EXPECT_FALSE(play);
++                EXPECT_EQ(QThread::currentThread(), selected->thread());
++                delivered.append(std::move(selected));
++            });
++    table.selectRow(0);
++    table.loadSelectedTrackToGroup("[Channel1]", false);
++    bool heartbeat = false;
++    QTimer::singleShot(0, &table, [&] { heartbeat = true; });
++    QCoreApplication::processEvents();
++    EXPECT_TRUE(heartbeat);
++    EXPECT_TRUE(delivered.isEmpty());
++    EXPECT_EQ(RuntimeAnalysisState::Unknown, session->catalog()->findTrack(1)->analysisState);
++    table.selectRow(1);
++    table.loadSelectedTrackToGroup("[Channel1]", false);
++    paused.resume();
++    ASSERT_TRUE(waitForBrowserPreview([&] { return !delivered.isEmpty(); }));
++    QThreadPool::globalInstance()->waitForDone();
++    QCoreApplication::processEvents();
++    ASSERT_EQ(1, delivered.size());
++    EXPECT_EQ(2u, delivered.first()->getSourceBinding().rekordboxId());
++    model.clearSession();
++}
++
++TEST_F(RekordboxRuntimeTrackModelTest, AsyncLoadsDiscardDestroyedReceiversAndRevokedSessions) {
++    QTemporaryDir volume;
++    ASSERT_TRUE(write(pdb(volume), database(rows())));
++    ASSERT_TRUE(write(volume.filePath("Contents/test.mp3"), "audio fixture"));
++    auto session = std::make_shared<RekordboxUsbSession>(volume.path());
++    ASSERT_TRUE(session->load());
++    PausedBrowserPreviewReads paused;
++    RekordboxRuntimeTrackModel model(nullptr, trackCollectionManager());
++    model.showAllTracks(session);
++    int staleCalls = 0;
++    auto receiver = std::make_unique<QObject>();
++    model.requestTrack(model.index(0, 0), receiver.get(), [&](TrackPointer) { ++staleCalls; });
++    receiver.reset();
++    bool completed = false;
++    model.requestTrack(model.index(0, 0), &model, [&](TrackPointer selected) {
++        EXPECT_FALSE(selected);
++        completed = true;
++    });
++    session->invalidate();
++    paused.resume();
++    ASSERT_TRUE(waitForBrowserPreview([&] { return completed; }));
++    EXPECT_EQ(0, staleCalls);
++    model.clearSession();
++}
++
++TEST_F(RekordboxRuntimeTrackModelTest, AsyncLoadRechecksPlayingDeckProtectionAtCompletion) {
++    QTemporaryDir volume;
++    ASSERT_TRUE(write(pdb(volume), database(rows())));
++    ASSERT_TRUE(write(volume.filePath("Contents/test.mp3"), "audio fixture"));
++    auto session = std::make_shared<RekordboxUsbSession>(volume.path());
++    ASSERT_TRUE(session->load());
++    config()->setValue(ConfigKey("[Controls]", "LoadWhenDeckPlaying"), 0);
++    ControlObject playing(ConfigKey("[Channel1]", "play"));
++    ControlObject sourceLost(ConfigKey("[Channel1]", "rx3_source_lost"));
++    PausedBrowserPreviewReads paused;
++    RekordboxRuntimeTrackModel model(nullptr, trackCollectionManager());
++    model.showAllTracks(session);
++    ProxyTrackModel proxy(&model);
++    MetadataOnlyUsbTable table(config());
++    table.QTableView::setModel(&proxy);
++    table.selectRow(0);
++    int deliveries = 0;
++    QObject::connect(&table, &WLibraryTableView::loadTrackToPlayer, &table,
++            [&](TrackPointer, const QString&, bool) { ++deliveries; });
++    table.loadSelectedTrackToGroup("[Channel1]", false);
++    playing.set(1);
++    model.clearSession();
++    paused.resume();
++    QThreadPool::globalInstance()->waitForDone();
++    QCoreApplication::processEvents();
++    EXPECT_EQ(0, deliveries);
++}
++
++TEST_F(RekordboxRuntimeTrackModelTest, NewManualDeckRequestSupersedesAnotherLoadingContext) {
++    QTemporaryDir volume;
++    ASSERT_TRUE(write(pdb(volume), database(rows())));
++    ASSERT_TRUE(write(volume.filePath("Contents/test.mp3"), "audio fixture"));
++    auto session = std::make_shared<RekordboxUsbSession>(volume.path());
++    ASSERT_TRUE(session->load());
++    PausedBrowserPreviewReads paused;
++    QObject continuousContext, manualContext;
++    int oldDeliveries = 0;
++    bool latestComplete = false;
++    RekordboxUsbSession::requestTemporaryTrack(session, 1, &continuousContext,
++            [&](TrackPointer) { ++oldDeliveries; }, "[Channel2]");
++    RekordboxUsbSession::requestTemporaryTrack(session, 1, &manualContext,
++            [&](TrackPointer selected) { EXPECT_TRUE(selected); latestComplete = true; }, "[Channel2]");
++    paused.resume();
++    ASSERT_TRUE(waitForBrowserPreview([&] { return latestComplete; }));
++    QThreadPool::globalInstance()->waitForDone();
++    QCoreApplication::processEvents();
++    EXPECT_EQ(0, oldDeliveries);
++}
+diff --git a/src/test/rx3display_test.cpp b/src/test/rx3display_test.cpp
+--- a/src/test/rx3display_test.cpp
++++ b/src/test/rx3display_test.cpp
+@@ -2617,3 +2617,31 @@
+     EXPECT_EQ(1,config()->getValue<int>(ConfigKey("[Waveform]","OverviewDivisions")));
+     EXPECT_FALSE(shortcut.setUtilityValue("waveform_divisions",2));EXPECT_EQ(1,waveform->getOverviewDivisions());
+ }
++
++TEST_F(Rx3TouchPreviewTest, ReleaseAndSupersedeBeforeTrackProjectionNeverStartLateAudio) {
++    ControlPushButton play(ConfigKey("[PreviewDeck1]", "play"));
++    ControlObject position(ConfigKey("[PreviewDeck1]", "playposition"));
++    ControlObject main(ConfigKey("[PreviewDeck1]", "main_mix"));
++    ControlObject pfl(ConfigKey("[PreviewDeck1]", "pfl"));
++    const auto track = Track::newTemporary(mixxx::FileAccess(mixxx::FileInfo("/tmp/preview.wav")));
++    int loads = 0;
++    rx3::TouchPreview preview([&](TrackPointer) { ++loads; });
++    const auto released = preview.beginRequest(.2);
++    preview.completed({});
++    EXPECT_EQ(0, play.get());
++    preview.cancel();
++    preview.supply(released, track, {});
++    EXPECT_EQ(0, loads);
++    const auto stale = preview.beginRequest(.3);
++    const auto current = preview.beginRequest(.4);
++    preview.supply(stale, track, {});
++    EXPECT_EQ(0, loads);
++    preview.move(.9);
++    preview.supply(current, track, {});
++    EXPECT_EQ(1, loads);
++    EXPECT_EQ(0, play.get());
++    preview.completed(track);
++    EXPECT_EQ(1, play.get());
++    EXPECT_DOUBLE_EQ(.9, position.get());
++    preview.cancel();
++}
+diff --git a/src/widget/rx3touchpreview.h b/src/widget/rx3touchpreview.h
+--- a/src/widget/rx3touchpreview.h
++++ b/src/widget/rx3touchpreview.h
+@@ -17,15 +17,26 @@
+               m_position("[PreviewDeck1]", "playposition"),
+               m_main("[PreviewDeck1]", "main_mix"), m_pfl("[PreviewDeck1]", "pfl") {}
+     void begin(TrackPointer track, TrackPointer loaded, double fraction) {
++        if (!track) { cancel(); return; }
++        const auto request = beginRequest(fraction);
++        supply(request, std::move(track), std::move(loaded));
++    }
++    quint64 beginRequest(double fraction) {
+         cancel();
+-        if (!track || !std::isfinite(fraction)) return;
+-        m_track = track; m_fraction = std::clamp(fraction, 0.0, 1.0); m_held = true;
++        if (!std::isfinite(fraction)) return m_generation;
++        m_fraction = std::clamp(fraction, 0.0, 1.0); m_held = true;
+         m_main.set(0); m_pfl.set(1);
++        return m_generation;
++    }
++    void supply(quint64 request, TrackPointer track, TrackPointer loaded) {
++        if (!m_held || request != m_generation) return;
++        if (!track) { cancel(); return; }
++        m_track = track;
+         if (track == loaded) completed(track);
+         else m_load(track);
+     }
+     void completed(TrackPointer track) {
+-        if (!m_held || track != m_track) return;
++        if (!m_held || !track || track != m_track) return;
+         m_ready = true; m_position.set(m_fraction); m_play.set(1);
+     }
+     void move(double fraction) {
+@@ -34,6 +45,7 @@
+         if (m_ready) m_position.set(m_fraction);
+     }
+     void cancel() {
++        ++m_generation;
+         if (m_held) m_play.set(0);
+         m_held = m_ready = false; m_track.reset();
+     }
+@@ -45,5 +57,6 @@
+     TrackPointer m_track;
+     bool m_held = false, m_ready = false;
+     double m_fraction = 0;
++    quint64 m_generation = 0;
+ };
+ } // namespace rx3
+diff --git a/src/widget/wrx3browsertools.h b/src/widget/wrx3browsertools.h
+--- a/src/widget/wrx3browsertools.h
++++ b/src/widget/wrx3browsertools.h
+@@ -262,8 +262,17 @@
+     const auto origin=m_playbackOrigins.constFind(group);if(origin==m_playbackOrigins.cend()) return;
+     const auto& binding=track->getSourceBinding();const int index=origin->ids.indexOf(binding.rekordboxId());
+     if(index<0 || index+1>=origin->ids.size()) return;
+-    const auto next=m_backend->rekordboxFeature()->temporaryTrackForRoot(origin->root,origin->ids[index+1]);
+-    if(next) {const auto saved=*origin;m_origins.insert(next->getLocation(),saved);m_continuousLoads.insert(group+next->getLocation());emit m_backend->loadTrackToPlayer(next,group,ControlObject::get(ConfigKey(group,"rx3_auto_cue"))<=0);}
++    const auto saved = *origin;
++    m_backend->rekordboxFeature()->requestTemporaryTrackForRoot(saved.root, saved.ids[index + 1], this,
++            [this, group, track, saved](TrackPointer next) {
++                if (!next || !m_backend || PlayerInfo::instance().getTrackInfo(group) != track ||
++                        !track->isSourceAvailableForPlayback() || ControlObject::get(ConfigKey("[RX3Settings]", "play_mode")) > 0 ||
++                        ControlObject::get(ConfigKey(group, "rx3_track_end")) <= 0 ||
++                        ControlObject::get(ConfigKey(group, "cue_preview")) > 0) return;
++                m_origins.insert(next->getLocation(), saved);
++                m_continuousLoads.insert(group + next->getLocation());
++                emit m_backend->loadTrackToPlayer(next, group, ControlObject::get(ConfigKey(group, "rx3_auto_cue")) <= 0);
++            }, group);
+ }
+ 
+ inline void WRx3Browser::showBeatFxTools() {
+diff --git a/src/widget/wtracktableview.cpp b/src/widget/wtracktableview.cpp
+--- a/src/widget/wtracktableview.cpp
++++ b/src/widget/wtracktableview.cpp
+@@ -679,10 +679,9 @@
+     if (doubleClickAction == DlgPrefLibrary::TrackDoubleClickAction::LoadToDeck &&
+             pTrackModel->hasCapabilities(
+                     TrackModel::Capability::LoadToDeck)) {
+-        TrackPointer pTrack = pTrackModel->getTrack(index);
+-        if (pTrack) {
+-            emit loadTrack(pTrack);
+-        }
++        requestTrackForIndex(index, QStringLiteral("default-deck"), [this](TrackPointer track) {
++            if (track) emit loadTrack(track);
++        });
+     } else if (doubleClickAction == DlgPrefLibrary::TrackDoubleClickAction::AddToAutoDJBottom &&
+             pTrackModel->hasCapabilities(
+                     TrackModel::Capability::AddToAutoDJ)) {
+@@ -928,12 +927,15 @@
+                     if (group == "[PreviewDeck1]") m_touchPreview->completed(track);
+                 });
+             }
+-            auto* model = getTrackModel();
+             const auto rect = visualRect(index).adjusted(6, 0, -6, 0);
+             selectRow(index.row()); m_touchPreviewIndex = index;
+-            m_touchPreview->begin(model ? model->getTrack(index) : TrackPointer(),
+-                    PlayerInfo::instance().getTrackInfo("[PreviewDeck1]"),
++            const auto request = m_touchPreview->beginRequest(
+                     double(pEvent->pos().x() - rect.left()) / qMax(1, rect.width()));
++            requestTrackForIndex(index, "[PreviewDeck1]", [this, request](TrackPointer track) {
++                if (!m_touchPreviewIndex.isValid()) { m_touchPreview->cancel(); return; }
++                m_touchPreview->supply(request, std::move(track),
++                        PlayerInfo::instance().getTrackInfo("[PreviewDeck1]"));
++            });
+             pEvent->accept(); return;
+         }
+     }
+@@ -1782,11 +1784,27 @@
+     slotMouseDoubleClicked(indices.at(0));
+ }
+ 
+-void WTrackTableView::loadSelectedTrackToGroup(const QString& group, bool play) {
+-    const QModelIndexList indices = getSelectedRows();
+-    if (indices.isEmpty()) {
+-        return;
+-    }
++void WTrackTableView::requestTrackForIndex(const QModelIndex& index, const QString& requestKey,
++        std::function<void(TrackPointer)> ready) {
++    const auto generation = ++m_trackRequestGenerations[requestKey];
++    auto deliver = [this, requestKey, generation, ready = std::move(ready)](TrackPointer track) {
++        if (m_trackRequestGenerations.value(requestKey) == generation) ready(std::move(track));
++    };
++    auto sourceIndex = index;
++    auto* sourceModel = model();
++    while (auto* proxy = qobject_cast<QAbstractProxyModel*>(sourceModel)) {
++        sourceIndex = proxy->mapToSource(sourceIndex);
++        sourceModel = proxy->sourceModel();
++    }
++    if (auto* usbModel = qobject_cast<mixxx::rekordbox::RekordboxRuntimeTrackModel*>(sourceModel)) {
++        usbModel->requestTrack(sourceIndex, this, std::move(deliver), requestKey);
++    } else {
++        auto* trackModel = getTrackModel();
++        deliver(trackModel ? trackModel->getTrack(index) : TrackPointer());
++    }
++}
++
++bool WTrackTableView::canLoadTrackToGroup(const QString& group) const {
+     bool allowLoadTrackIntoPlayingDeck = false;
+     if (m_pConfig->exists(kConfigKeyLoadWhenDeckPlaying)) {
+         int loadWhenDeckPlaying =
+@@ -1811,14 +1829,18 @@
+             !PlayerManager::isPreviewDeckGroup(group) &&
+             ControlObject::get(ConfigKey(group, "play")) > 0.0 &&
+             ControlObject::get(ConfigKey(group, "rx3_source_lost")) <= 0.0) {
+-        return;
+-    }
+-    auto index = indices.at(0);
+-    auto* pTrackModel = getTrackModel();
+-    TrackPointer pTrack;
+-    if (pTrackModel && (pTrack = pTrackModel->getTrack(index))) {
+-        emit loadTrackToPlayer(pTrack, group, play);
+-    }
++        return false;
++    }
++    return true;
++}
++
++void WTrackTableView::loadSelectedTrackToGroup(const QString& group, bool play) {
++    const auto indices = getSelectedRows();
++    if (indices.isEmpty() || !canLoadTrackToGroup(group)) return;
++    requestTrackForIndex(indices.at(0), group, [this, group, play](TrackPointer track) {
++        // The deck may have started playing while USB projection was pending.
++        if (track && canLoadTrackToGroup(group)) emit loadTrackToPlayer(track, group, play);
++    });
+ }
+ 
+ QList<TrackId> WTrackTableView::getSelectedTrackIds() const {
+diff --git a/src/widget/wtracktableview.h b/src/widget/wtracktableview.h
+--- a/src/widget/wtracktableview.h
++++ b/src/widget/wtracktableview.h
+@@ -13,6 +13,8 @@
+ #include "widget/wlibrarytableview.h"
+ #include "widget/rx3touchpreview.h"
+ #include <QPersistentModelIndex>
++#include <QHash>
++#include <functional>
+ 
+ class ControlProxy;
+ class DlgTagFetcher;
+@@ -149,6 +151,10 @@
+     QString getModelStateKey() const override;
+ 
+   private:
++    void requestTrackForIndex(const QModelIndex& index, const QString& requestKey,
++            std::function<void(TrackPointer)> ready);
++    bool canLoadTrackToGroup(const QString& group) const;
++    QHash<QString, quint64> m_trackRequestGenerations;
+     void addToAutoDJ(PlaylistDAO::AutoDJSendLoc loc);
+     void dragMoveEvent(QDragMoveEvent * event) override;
+     void dragEnterEvent(QDragEnterEvent * event) override;
