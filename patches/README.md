@@ -690,3 +690,21 @@ occupied endpoints, to avoid counting one extra pixel with Linux font substituti
 - Toggle the menu without changing its auto-hide preference, browser page or
   deck transport. Keep the browser's existing MENU / UTILITY action separate.
 - Verify repeated show/hide through both buttons with auto-hide enabled and disabled.
+
+
+## 0063 — Retained browser previews and track-list artwork
+
+- Preserve decoded waveforms and artwork across list resets and leaving the
+  browser, with connection UUID keys and no reuse after USB revocation.
+- Replace the 128-waveform limit with LRU storage costs in KiB. Recheck memory
+  every five seconds: up to 1/64 of physical RAM and 1/16 of available RAM after
+  a 128 MiB reserve, capped at 256 MiB overall (3/4 waveforms, 1/4 artwork).
+  Suspend new preview requests when available RAM reaches the reserve; use a
+  conservative 16 MiB budget when the platform cannot report physical memory.
+- Decode exported artwork on bounded workers using the existing path, image
+  size and session guards. Retain 128-pixel thumbnails and negative results;
+  never project browser rows to persistent Tracks or export unguarded paths.
+- Show a square artwork column in regular, expanded and search track lists.
+  Draw images through proxy sorting/filtering while keeping aspect ratios.
+- Cover memory budgets, more than 128 decoded previews, navigation reuse,
+  same-ID device isolation, proxy painting and revoked artwork completions.

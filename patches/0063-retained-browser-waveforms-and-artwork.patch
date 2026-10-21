@@ -1,0 +1,702 @@
+diff --git a/src/library/rekordbox/rekordboxruntimetrackmodel.cpp b/src/library/rekordbox/rekordboxruntimetrackmodel.cpp
+--- a/src/library/rekordbox/rekordboxruntimetrackmodel.cpp
++++ b/src/library/rekordbox/rekordboxruntimetrackmodel.cpp
+@@ -1,6 +1,13 @@
+ #include "library/rekordbox/rekordboxruntimetrackmodel.h"
+ 
+ #include <QFileInfo>
++#include <QFile>
++#if defined(Q_OS_WIN)
++#include <windows.h>
++#elif defined(Q_OS_MACOS)
++#include <mach/mach.h>
++#include <sys/sysctl.h>
++#endif
+ #include <QFutureWatcher>
+ #include <QTimer>
+ #include <QUrlQuery>
+@@ -22,6 +29,7 @@
+ const QStringList kColumns{
+         LIBRARYTABLE_ID,
+         LIBRARYTABLE_PREVIEW,
++        LIBRARYTABLE_COVERART,
+         LIBRARYTABLE_ARTIST,
+         LIBRARYTABLE_TITLE,
+         LIBRARYTABLE_ALBUM,
+@@ -36,7 +44,78 @@
+         LIBRARYTABLE_FILETYPE,
+ };
+ 
++// These lightweight platform queries run only every five seconds on the GUI
++// thread. No audio, artwork, or USB files are opened here.
++QPair<quint64, quint64> browserMemoryBytes() {
++#if defined(Q_OS_LINUX)
++    QFile info(QStringLiteral("/proc/meminfo"));
++    quint64 total = 0, available = 0;
++    if (info.open(QIODevice::ReadOnly)) {
++        const auto lines = info.readAll().split('\n');
++        for (const auto& line : lines) {
++            const auto fields = line.simplified().split(' ');
++            if (fields.size() < 2) continue;
++            if (fields[0] == "MemTotal:") total = fields[1].toULongLong() * 1024;
++            if (fields[0] == "MemAvailable:") available = fields[1].toULongLong() * 1024;
++        }
++    }
++    return {total, available};
++#elif defined(Q_OS_WIN)
++    MEMORYSTATUSEX status{};
++    status.dwLength = sizeof(status);
++    if (GlobalMemoryStatusEx(&status)) return {status.ullTotalPhys, status.ullAvailPhys};
++#elif defined(Q_OS_MACOS)
++    quint64 total = 0;
++    size_t size = sizeof(total);
++    vm_statistics64_data_t stats{};
++    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
++    const auto host = mach_host_self();
++    vm_size_t pageSize = 0;
++    const bool valid = sysctlbyname("hw.memsize", &total, &size, nullptr, 0) == 0 &&
++            host_page_size(host, &pageSize) == KERN_SUCCESS &&
++            host_statistics64(host, HOST_VM_INFO64, reinterpret_cast<host_info64_t>(&stats), &count) == KERN_SUCCESS;
++    mach_port_deallocate(mach_task_self(), host);
++    if (valid) return {total, (quint64(stats.free_count) + stats.inactive_count) * pageSize};
++#endif
++    return {};
++}
++
+ } // namespace
++
++int RekordboxRuntimeTrackModel::browserCacheBudgetKiB(quint64 totalBytes, quint64 availableBytes) {
++    if (!totalBytes) return 16 * 1024;
++    constexpr quint64 reserve = 128 * 1024 * 1024;
++    if (availableBytes <= reserve) return 0;
++    const int budget = int(std::min({quint64(256 * 1024), totalBytes / (64 * 1024),
++            (availableBytes - reserve) / (16 * 1024)}));
++    // Keep both partitions large enough for at least one bounded thumbnail;
++    // an entry larger than its cache would otherwise trigger repeated reads.
++    return budget >= 512 ? budget : 0;
++}
++
++void RekordboxRuntimeTrackModel::refreshBrowserCacheBudget() {
++    const auto memory = browserMemoryBytes();
++    const int budget = browserCacheBudgetKiB(memory.first, memory.second);
++    // Artwork gets one quarter; both LRU caches account for actual decoded
++    // storage and a minimum entry cost (including missing/corrupt results).
++    m_waveformPreviewCache.setMaxCost(budget * 3 / 4);
++    m_artworkPreviewCache.setMaxCost(budget / 4);
++    for (auto it = m_cachedSessions.begin(); it != m_cachedSessions.end();) {
++        const auto state = it.value().lock();
++        if (state && state->isActive()) { ++it; continue; }
++        for (const auto& key : m_waveformPreviewCache.keys()) {
++            if (key.startsWith(it.key())) m_waveformPreviewCache.remove(key);
++        }
++        for (const auto& key : m_artworkPreviewCache.keys()) {
++            if (key.startsWith(it.key())) m_artworkPreviewCache.remove(key);
++        }
++        it = m_cachedSessions.erase(it);
++    }
++}
++
++QString RekordboxRuntimeTrackModel::previewCacheKey(quint32 id, int variant) const {
++    return m_cacheSessionPrefix + QString::number(quint64(id) * 3 + variant);
++}
+ 
+ RekordboxRuntimeTrackModel::RekordboxRuntimeTrackModel(
+         QObject* parent,
+@@ -45,6 +124,10 @@
+                   parent,
+                   pTrackCollectionManager,
+                   "mixxx.db.model.rekordbox_usb_runtime") {
++    refreshBrowserCacheBudget();
++    auto* budgetTimer = new QTimer(this);
++    connect(budgetTimer, &QTimer::timeout, this, &RekordboxRuntimeTrackModel::refreshBrowserCacheBudget);
++    budgetTimer->start(5000);
+     initTableColumnsAndHeaderProperties(kColumns);
+     const auto addSortColumn = [this](SortColumnId sortColumn, ColumnCache::Column column) {
+         const auto index = fieldIndex(column);
+@@ -155,7 +238,9 @@
+     ++m_previewGeneration;
+     if (m_analysisCancelled) m_analysisCancelled->store(true);
+     m_analysisPrefetchStarted = false;
+-    m_waveformPreviewCache.clear();
++    refreshBrowserCacheBudget();
++    m_artworkRequests.clear();
++    m_pendingArtworkPreviews.clear();
+     m_pendingWaveformPreviews.clear();
+     m_previewRequests.clear();
+     m_analysisRequests.clear();
+@@ -172,6 +257,8 @@
+     const auto sessionId = state
+             ? state->identifier().uuid().toString(QUuid::WithoutBraces)
+             : QStringLiteral("none");
++    m_cacheSessionPrefix = sessionId + QLatin1Char('/');
++    if (state && state->isActive()) m_cachedSessions.insert(m_cacheSessionPrefix, state);
+     m_viewKey = QStringLiteral("rekordbox-usb:%1:%2")
+                         .arg(sessionId, std::move(viewKey));
+     endResetModel();
+@@ -322,7 +409,7 @@
+     const auto* track = trackAt(index);
+     const auto state = sessionState();
+     return track && state && state->isActive()
+-            ? m_waveformPreviewCache.object(quint64(track->rekordboxId) * 3 + int(mode))
++            ? m_waveformPreviewCache.object(previewCacheKey(track->rekordboxId, int(mode)))
+             : nullptr;
+ }
+ 
+@@ -330,20 +417,68 @@
+         const QModelIndex& index, WaveformMode mode) {
+     const auto* track = trackAt(index);
+     const auto state = sessionState();
+-    if (!track || !state || !state->isActive()) return;
++    if (!track || !state || !state->isActive() || !m_waveformPreviewCache.maxCost()) return;
+     const quint32 rekordboxId = track->rekordboxId;
+     const quint64 key = quint64(rekordboxId) * 3 + int(mode);
+-    if (m_waveformPreviewCache.contains(key) || m_pendingWaveformPreviews.contains(key)) return;
++    if (m_waveformPreviewCache.contains(previewCacheKey(rekordboxId, int(mode))) || m_pendingWaveformPreviews.contains(key)) return;
+ 
+     m_pendingWaveformPreviews.insert(key);
+     m_previewRequests.enqueue(qMakePair(rekordboxId, mode));
+     schedulePreviewRead();
+ }
+ 
++const QImage* RekordboxRuntimeTrackModel::artworkPreview(const QModelIndex& index) const {
++    const auto* track = trackAt(index);
++    const auto state = sessionState();
++    return track && state && state->isActive()
++            ? m_artworkPreviewCache.object(previewCacheKey(track->rekordboxId, 0)) : nullptr;
++}
++
++void RekordboxRuntimeTrackModel::requestArtworkPreview(const QModelIndex& index) {
++    const auto* track = trackAt(index);
++    const auto state = sessionState();
++    if (!track || !state || !state->isActive() || !m_artworkPreviewCache.maxCost()) return;
++    const auto id = track->rekordboxId;
++    if (m_artworkPreviewCache.contains(previewCacheKey(id, 0)) || m_pendingArtworkPreviews.contains(id)) return;
++    m_pendingArtworkPreviews.insert(id);
++    m_artworkRequests.enqueue(id);
++    schedulePreviewRead();
++}
++
++void RekordboxRuntimeTrackModel::startNextArtworkRead() {
++    const auto id = m_artworkRequests.dequeue();
++    const auto session = m_session;
++    const auto state = sessionState();
++    const auto key = previewCacheKey(id, 0);
++    const auto generation = m_previewGeneration;
++    m_previewReadRunning = true;
++    auto* watcher = new QFutureWatcher<QImage>(this);
++    connect(watcher, &QFutureWatcher<QImage>::finished, this, [this, watcher, id, key, state, generation] {
++        auto artwork = watcher->result();
++        watcher->deleteLater();
++        m_previewReadRunning = false;
++        if (state && state->isActive()) {
++            const int cost = int((artwork.sizeInBytes() + 1023) / 1024) + 1;
++            m_artworkPreviewCache.insert(key, new QImage(std::move(artwork)), cost);
++        }
++        if (generation == m_previewGeneration) m_pendingArtworkPreviews.remove(id);
++        if (state && state->isActive() && state == sessionState()) {
++            const int column = fieldIndex(ColumnCache::COLUMN_LIBRARYTABLE_COVERART);
++            const auto rows = m_rowsByTrackId.value(id);
++            for (const auto row : rows) {
++                if (state != sessionState() || generation != m_previewGeneration) break;
++                if (column >= 0) emit dataChanged(index(row, column), index(row, column));
++            }
++        }
++        schedulePreviewRead();
++    });
++    watcher->setFuture(QtConcurrent::run([session, id] { return session->loadTrackArtwork(id, 128); }));
++}
++
+ void RekordboxRuntimeTrackModel::schedulePreviewRead() {
+     // Defer until the list is published and painting has queued visible rows.
+     // No USB file reads or analysis inspection run on the GUI/audio thread.
+-    QTimer::singleShot(m_previewRequests.isEmpty() ? 5 : 0, this, [this] { startNextPreviewRead(); });
++    QTimer::singleShot(m_previewRequests.isEmpty() && m_artworkRequests.isEmpty() ? 5 : 0, this, [this] { startNextPreviewRead(); });
+ }
+ 
+ void RekordboxRuntimeTrackModel::startNextAnalysisRead() {
+@@ -390,11 +525,17 @@
+     const auto state = sessionState();
+     if (!state || !state->isActive()) {
+         m_previewRequests.clear();
++        m_artworkRequests.clear();
++        m_pendingArtworkPreviews.clear();
+         m_analysisRequests.clear();
+         m_pendingWaveformPreviews.clear();
+         return;
+     }
+     const bool decodePreview = !m_previewRequests.isEmpty();
++    if (!decodePreview && !m_artworkRequests.isEmpty()) {
++        startNextArtworkRead();
++        return;
++    }
+     if (!decodePreview && m_analysisRequests.isEmpty()) return;
+     if (!decodePreview) {
+         startNextAnalysisRead();
+@@ -408,19 +549,20 @@
+     const quint64 key = quint64(rekordboxId) * 3 + int(mode);
+     const auto session = m_session;
+     const auto generation = m_previewGeneration;
++    const auto cacheKey = previewCacheKey(rekordboxId, int(mode));
+     m_previewReadRunning = true;
+     auto* watcher = new QFutureWatcher<WaveformSeries>(this);
+     connect(watcher, &QFutureWatcher<WaveformSeries>::finished, this,
+-            [this, watcher, rekordboxId, key, generation, decodePreview] {
++            [this, watcher, rekordboxId, key, cacheKey, state, generation, decodePreview] {
+                 auto preview = watcher->result();
+                 watcher->deleteLater();
+                 m_previewReadRunning = false;
+-                const auto state = sessionState();
+-                if (generation == m_previewGeneration && state && state->isActive()) {
+-                    if (decodePreview) {
+-                        m_pendingWaveformPreviews.remove(key);
+-                        m_waveformPreviewCache.insert(key, new WaveformSeries(std::move(preview)));
+-                    }
++                if (state && state->isActive() && decodePreview) {
++                    const int cost = int((preview.columns.capacity() * sizeof(RuntimeWaveformColumn) + 1023) / 1024) + 1;
++                    m_waveformPreviewCache.insert(cacheKey, new WaveformSeries(std::move(preview)), cost);
++                }
++                if (generation == m_previewGeneration && state && state->isActive() && state == sessionState()) {
++                    m_pendingWaveformPreviews.remove(key);
+                     const int column = fieldIndex(ColumnCache::COLUMN_LIBRARYTABLE_PREVIEW);
+                     if (column >= 0) {
+                         const auto rows = m_rowsByTrackId.value(rekordboxId);
+diff --git a/src/library/rekordbox/rekordboxruntimetrackmodel.h b/src/library/rekordbox/rekordboxruntimetrackmodel.h
+--- a/src/library/rekordbox/rekordboxruntimetrackmodel.h
++++ b/src/library/rekordbox/rekordboxruntimetrackmodel.h
+@@ -2,6 +2,7 @@
+ 
+ #include <QCache>
+ #include <QHash>
++#include <QImage>
+ #include <QList>
+ #include <QQueue>
+ #include <QSet>
+@@ -67,12 +68,19 @@
+     // List activation inspects analysis in the background; visible waveform
+     // requests take priority over the remaining rows. nullptr means not ready
+     // yet; empty columns mean no supported/valid preview is available.
++    // Decoded previews survive list changes, bounded by a memory budget.
++    // Cache keys include the connection UUID; revoked sessions are purged.
+     // The cache is session-scoped and
+     // never enters SQL or the persistent Track model.
+     const WaveformSeries* waveformPreview(
+             const QModelIndex& index, WaveformMode mode) const;
+     void requestWaveformPreview(const QModelIndex& index, WaveformMode mode);
++    const QImage* artworkPreview(const QModelIndex& index) const;
++    void requestArtworkPreview(const QModelIndex& index);
+     std::shared_ptr<const SessionState> sessionState() const;
++    // Total waveform + artwork budget, in KiB. Zero suspends new reads under
++    // severe pressure; unknown platform memory uses a conservative fallback.
++    static int browserCacheBudgetKiB(quint64 totalBytes, quint64 availableBytes);
+ 
+   protected:
+     QVariant rawValue(const QModelIndex& index) const override;
+@@ -84,6 +92,9 @@
+     const RuntimeTrack* trackAt(const QModelIndex& index) const;
+     void startNextPreviewRead();
+     void startNextAnalysisRead();
++    void startNextArtworkRead();
++    void refreshBrowserCacheBudget();
++    QString previewCacheKey(quint32 id, int variant) const;
+     void schedulePreviewRead();
+ 
+     std::shared_ptr<RekordboxUsbSession> m_session;
+@@ -92,7 +103,12 @@
+     QHash<int, SortColumnId> m_sortColumnIds;
+     QHash<int, int> m_columnIndexes;
+     QString m_viewKey{QStringLiteral("rekordbox-usb:empty")};
+-    QCache<quint64, WaveformSeries> m_waveformPreviewCache{128};
++    QCache<QString, WaveformSeries> m_waveformPreviewCache;
++    QCache<QString, QImage> m_artworkPreviewCache;
++    QHash<QString, std::weak_ptr<const SessionState>> m_cachedSessions;
++    QString m_cacheSessionPrefix;
++    QQueue<quint32> m_artworkRequests;
++    QSet<quint32> m_pendingArtworkPreviews;
+     QSet<quint64> m_pendingWaveformPreviews;
+     QQueue<QPair<quint32, WaveformMode>> m_previewRequests;
+     QQueue<quint32> m_analysisRequests;
+diff --git a/src/library/rekordbox/rekordboxusbsession.cpp b/src/library/rekordbox/rekordboxusbsession.cpp
+--- a/src/library/rekordbox/rekordboxusbsession.cpp
++++ b/src/library/rekordbox/rekordboxusbsession.cpp
+@@ -731,7 +731,6 @@
+     if (!runtimeTrack) return {};
+     if (cancelled && cancelled->load()) return {};
+     std::shared_ptr<const SessionState> sessionState;
+-    QString root;
+     {
+         const std::lock_guard<std::mutex> lock(m_mutex);
+         if (m_state != UsbSessionState::Ready || !m_catalog ||
+@@ -742,7 +741,6 @@
+             return {};
+         }
+         sessionState = m_sessionState;
+-        root = m_root;
+     }
+     // Load each native style and preview on demand; mounting stays descriptor-only.
+     const auto waveformPriority = [](const RuntimeWaveform& waveform) {
+@@ -788,6 +786,27 @@
+         }
+     }
+     if (cancelled && cancelled->load()) return {};
++    const auto artwork = loadTrackArtwork(rekordboxId);
++    if (cancelled && cancelled->load()) return {};
++    auto projected = RekordboxTrackAdapter::createTemporaryTrack(
++            *runtimeTrack, sessionState, std::move(loadedWaveforms), error);
++    if (projected) projected->setProperty("rekordboxArtwork", artwork);
++    return projected;
++}
++QImage RekordboxUsbSession::loadTrackArtwork(quint32 rekordboxId, int maxSize) {
++    if (maxSize <= 0 || !refresh()) return {};
++    maxSize = std::min(maxSize, 512);
++    std::shared_ptr<const SessionState> sessionState;
++    std::optional<RuntimeTrack> runtimeTrack;
++    QString root;
++    {
++        const std::lock_guard<std::mutex> lock(m_mutex);
++        if (m_state != UsbSessionState::Ready || !m_catalog) return {};
++        sessionState = m_sessionState;
++        runtimeTrack = m_catalog->findTrack(rekordboxId);
++        root = m_root;
++    }
++    if (!runtimeTrack || !sessionState->isActive()) return {};
+     // Read only the selected track's exported artwork, on the load worker.
+     // Retain pixels instead of an unguarded path for later GUI/cache reads.
+     QImage artwork;
+@@ -805,8 +824,8 @@
+                 const auto dimensions = reader.size();
+                 if (dimensions.isValid() &&
+                         qint64(dimensions.width()) * dimensions.height() <= 16 * 1024 * 1024) {
+-                    if (dimensions.width() > 512 || dimensions.height() > 512) {
+-                        reader.setScaledSize(dimensions.scaled(512, 512, Qt::KeepAspectRatio));
++                    if (dimensions.width() > maxSize || dimensions.height() > maxSize) {
++                        reader.setScaledSize(dimensions.scaled(maxSize, maxSize, Qt::KeepAspectRatio));
+                     }
+                     artwork = reader.read();
+                 }
+@@ -814,12 +833,9 @@
+         }
+         if (!refresh()) return {};
+     }
+-    if (cancelled && cancelled->load()) return {};
+-    auto projected = RekordboxTrackAdapter::createTemporaryTrack(
+-            *runtimeTrack, sessionState, std::move(loadedWaveforms), error);
+-    if (projected) projected->setProperty("rekordboxArtwork", artwork);
+-    return projected;
+-}
++    return sessionState->isActive() ? artwork : QImage();
++}
++
+ void RekordboxUsbSession::requestTemporaryTrack(std::shared_ptr<RekordboxUsbSession> session,
+         quint32 rekordboxId, QObject* context, std::function<void(TrackPointer)> ready,
+         const QString& requestKey) {
+diff --git a/src/library/rekordbox/rekordboxusbsession.h b/src/library/rekordbox/rekordboxusbsession.h
+--- a/src/library/rekordbox/rekordboxusbsession.h
++++ b/src/library/rekordbox/rekordboxusbsession.h
+@@ -1,4 +1,6 @@
+ #pragma once
++
++#include <QImage>
+ 
+ #include <memory>
+ #include <mutex>
+@@ -56,6 +58,9 @@
+     // of the sealed catalog; returned bytes own their storage.
+     std::optional<QByteArray> loadWaveformPayload(
+             const RuntimeWaveform& descriptor, QString* error = nullptr);
++    // Bounded image decode with the same volume/session guards as deck loads.
++    // Worker-thread I/O only; browser thumbnails never project a Track.
++    QImage loadTrackArtwork(quint32 rekordboxId, int maxSize = 512);
+     void invalidate();
+     DeviceSnapshot deviceSnapshot() const;
+     UsbSessionState state() const;
+diff --git a/src/library/tabledelegates/coverartdelegate.cpp b/src/library/tabledelegates/coverartdelegate.cpp
+--- a/src/library/tabledelegates/coverartdelegate.cpp
++++ b/src/library/tabledelegates/coverartdelegate.cpp
+@@ -1,6 +1,8 @@
+ #include "library/tabledelegates/coverartdelegate.h"
+ 
+ #include <QPainter>
++#include <QAbstractProxyModel>
++#include "library/rekordbox/rekordboxruntimetrackmodel.h"
+ #include <QTableView>
+ #include <algorithm>
+ 
+@@ -81,7 +83,9 @@
+ 
+ void CoverArtDelegate::slotInhibitLazyLoading(
+         bool inhibitLazyLoading) {
++    const bool wasInhibited = m_inhibitLazyLoading;
+     m_inhibitLazyLoading = inhibitLazyLoading;
++    if (wasInhibited && !m_inhibitLazyLoading) m_pTableView->viewport()->update();
+     if (m_inhibitLazyLoading || m_cacheMissRows.isEmpty()) {
+         return;
+     }
+@@ -131,6 +135,31 @@
+         const QStyleOptionViewItem& option,
+         const QModelIndex& index) const {
+     VERIFY_OR_DEBUG_ASSERT(m_pTrackModel) {
++        return;
++    }
++    auto sourceIndex = index;
++    auto* sourceModel = m_pTableView->model();
++    while (auto* proxy = qobject_cast<QAbstractProxyModel*>(sourceModel)) {
++        sourceIndex = proxy->mapToSource(sourceIndex);
++        sourceModel = proxy->sourceModel();
++    }
++    if (auto* usb = qobject_cast<mixxx::rekordbox::RekordboxRuntimeTrackModel*>(sourceModel)) {
++        // USB artwork uses guarded, bounded workers and retained pixels. Never
++        // send removable file paths into the ordinary cover-art pipeline.
++        paintItemBackground(painter, option, index);
++        const auto* image = usb->artworkPreview(sourceIndex);
++        if (!image) {
++            if (!m_inhibitLazyLoading) usb->requestArtworkPreview(sourceIndex);
++        } else if (!image->isNull()) {
++            const auto bounds = option.rect.adjusted(2, 2, -2, -2);
++            const auto size = image->size().scaled(bounds.size(), Qt::KeepAspectRatio);
++            const QRect target(bounds.center() - QPoint(size.width() / 2, size.height() / 2), size);
++            painter->save();
++            painter->setRenderHint(QPainter::SmoothPixmapTransform);
++            painter->drawImage(target, *image);
++            painter->restore();
++        }
++        if (option.state & QStyle::State_HasFocus) drawBorder(painter, m_focusBorderColor, option.rect);
+         return;
+     }
+     CoverInfo coverInfo = m_pTrackModel->getCoverInfo(index);
+diff --git a/src/test/rekordboxusbsession_test.cpp b/src/test/rekordboxusbsession_test.cpp
+--- a/src/test/rekordboxusbsession_test.cpp
++++ b/src/test/rekordboxusbsession_test.cpp
+@@ -23,6 +23,9 @@
+ #include <QSqlQuery>
+ #include <QTemporaryDir>
+ #include <QImage>
++#include <QPainter>
++#include <QTableView>
++#include "library/tabledelegates/coverartdelegate.h"
+ #include <QtEndian>
+ 
+ #include "library/rekordbox/rekordboxdatabase.h"
+@@ -631,6 +634,151 @@
+     EXPECT_EQ(nullptr,model.waveformPreview(index,WaveformMode::RGB));
+ }
+ 
++TEST(RekordboxBrowserCacheTest, BudgetTracksTotalAndAvailableMemoryAndCapsUsage) {
++    constexpr quint64 mib = 1024 * 1024;
++    EXPECT_EQ(16 * 1024, RekordboxRuntimeTrackModel::browserCacheBudgetKiB(0, 0));
++    EXPECT_EQ(64 * 1024, RekordboxRuntimeTrackModel::browserCacheBudgetKiB(4096 * mib, 2048 * mib));
++    EXPECT_EQ(8 * 1024, RekordboxRuntimeTrackModel::browserCacheBudgetKiB(4096 * mib, 256 * mib));
++    EXPECT_EQ(0, RekordboxRuntimeTrackModel::browserCacheBudgetKiB(4096 * mib, 128 * mib));
++    EXPECT_EQ(0, RekordboxRuntimeTrackModel::browserCacheBudgetKiB(4096 * mib, 0));
++    EXPECT_EQ(0, RekordboxRuntimeTrackModel::browserCacheBudgetKiB(4096 * mib, 129 * mib));
++    EXPECT_EQ(256 * 1024, RekordboxRuntimeTrackModel::browserCacheBudgetKiB(65536 * mib, 32768 * mib));
++}
++
++TEST_F(RekordboxRuntimeTrackModelTest, RetainsMoreThan128PreviewsAcrossListsAndBrowserExit) {
++    QTemporaryDir volume;
++    Rows data;
++    for (int id = 1; id <= 160; ++id) {
++        const auto owner = QStringLiteral("/Contents/%1.mp3").arg(id);
++        const auto path = QStringLiteral("/PIONEER/USBANLZ/%1.DAT").arg(id);
++        data.append({0, track(id, owner.toUtf8(), path.toUtf8())});
++        ASSERT_TRUE(write(volume.path() + path, syntheticBrowserPreview(owner)));
++    }
++    ASSERT_TRUE(write(pdb(volume), database(data)));
++    auto session = std::make_shared<RekordboxUsbSession>(volume.path());
++    ASSERT_TRUE(session->load());
++    RekordboxRuntimeTrackModel model(nullptr, trackCollectionManager());
++    model.showAllTracks(session);
++    for (int row = 0; row < model.rowCount(); ++row)
++        model.requestWaveformPreview(model.index(row, 0), WaveformMode::ThreeBand);
++    ASSERT_TRUE(waitForBrowserPreview([&] {
++        return model.waveformPreview(model.index(159, 0), WaveformMode::ThreeBand) != nullptr;
++    }));
++    const auto* first = model.waveformPreview(model.index(0, 0), WaveformMode::ThreeBand);
++    ASSERT_NE(nullptr, first);
++    EXPECT_EQ(2, first->columns.size());
++    model.showPlaylist(session, {160, 1, 1}, 42);
++    EXPECT_EQ(first, model.waveformPreview(model.index(1, 0), WaveformMode::ThreeBand));
++    model.clearSession();
++    EXPECT_EQ(0, model.rowCount());
++    model.showTrackIds(session, {1}, QStringLiteral("search"));
++    EXPECT_EQ(first, model.waveformPreview(model.index(0, 0), WaveformMode::ThreeBand));
++    // Switching devices with equal numeric IDs must not reuse the other USB.
++    auto second = std::make_shared<RekordboxUsbSession>(volume.path());
++    ASSERT_TRUE(second->load());
++    model.showAllTracks(second);
++    EXPECT_EQ(nullptr, model.waveformPreview(model.index(0, 0), WaveformMode::ThreeBand));
++    model.showAllTracks(session);
++    EXPECT_EQ(first, model.waveformPreview(model.index(0, 0), WaveformMode::ThreeBand));
++    session->invalidate();
++    EXPECT_EQ(nullptr, model.waveformPreview(model.index(0, 0), WaveformMode::ThreeBand));
++}
++
++TEST_F(RekordboxRuntimeTrackModelTest, BrowserArtworkRendersThroughProxyAndSurvivesNavigation) {
++    QTemporaryDir volume;
++    auto song = track();
++    put32(&song, 28, 7);
++    QByteArray artworkRow(4, '\0');
++    put32(&artworkRow, 0, 7);
++    ASSERT_TRUE(write(pdb(volume), database({{0, song}, {0, track(2, "/Contents/second.mp3", "/PIONEER/USBANLZ/second.DAT")},
++            {13, artworkRow + text("/PIONEER/art.png")}})));
++    QImage source(800, 400, QImage::Format_RGB32);
++    source.fill(Qt::red);
++    ASSERT_TRUE(source.save(volume.filePath("PIONEER/art.png")));
++    auto session = std::make_shared<RekordboxUsbSession>(volume.path());
++    ASSERT_TRUE(session->load());
++    RekordboxRuntimeTrackModel model(nullptr, trackCollectionManager());
++    model.showAllTracks(session);
++    ASSERT_EQ(2, model.rowCount());
++    ProxyTrackModel proxy(&model);
++    QTableView table;
++    table.setModel(&proxy);
++    proxy.sort(model.fieldIndex(ColumnCache::COLUMN_LIBRARYTABLE_ID), Qt::DescendingOrder);
++    CoverArtDelegate delegate(&table);
++    const int column = model.fieldIndex(ColumnCache::COLUMN_LIBRARYTABLE_COVERART);
++    ASSERT_GE(column, 0);
++    QStyleOptionViewItem option;
++    option.rect = QRect(0, 0, 48, 48);
++    const auto render = [&](const QModelIndex& row) {
++        QImage output(48, 48, QImage::Format_RGB32);
++        output.fill(Qt::black);
++        QPainter painter(&output);
++        delegate.paintItem(&painter, option, row);
++        painter.end();
++        return output;
++    };
++    const auto row = proxy.mapFromSource(model.index(0, column));
++    ASSERT_TRUE(row.isValid());
++    EXPECT_EQ(1, row.row()); // Track 1 after reverse sorting.
++    EXPECT_NE(QColor(Qt::red), render(row).pixelColor(24, 24));
++    ASSERT_TRUE(waitForBrowserPreview([&] { return model.artworkPreview(model.index(0, column)) != nullptr; }));
++    const auto* image = model.artworkPreview(model.index(0, column));
++    ASSERT_FALSE(image->isNull());
++    EXPECT_EQ(QSize(128, 64), image->size());
++    EXPECT_EQ(QColor(Qt::red), render(row).pixelColor(24, 24));
++    EXPECT_FALSE(model.getTrackId(model.index(0, column)).isValid());
++    model.showPlaylist(session, {1, 1, 2}, 42);
++    EXPECT_EQ(image, model.artworkPreview(model.index(1, column)));
++    model.clearSession();
++    model.showAllTracks(session);
++    EXPECT_EQ(image, model.artworkPreview(model.index(0, column)));
++    // Absent images are cached too, avoiding a read/repaint loop.
++    model.requestArtworkPreview(model.index(1, column));
++    ASSERT_TRUE(waitForBrowserPreview([&] { return model.artworkPreview(model.index(1, column)) != nullptr; }));
++    EXPECT_TRUE(model.artworkPreview(model.index(1, column))->isNull());
++    session->invalidate();
++    EXPECT_EQ(nullptr, model.artworkPreview(model.index(0, column)));
++    auto reconnected = std::make_shared<RekordboxUsbSession>(volume.path());
++    ASSERT_TRUE(reconnected->load());
++    model.showAllTracks(reconnected);
++    EXPECT_EQ(nullptr, model.artworkPreview(model.index(0, column)));
++}
++
++TEST_F(RekordboxRuntimeTrackModelTest, RevokedArtworkWorkerCannotPublishToReconnectedDevice) {
++    QTemporaryDir volume;
++    auto song = track();
++    put32(&song, 28, 7);
++    QByteArray artworkRow(4, '\0');
++    put32(&artworkRow, 0, 7);
++    ASSERT_TRUE(write(pdb(volume), database({{0, song},
++            {13, artworkRow + text("/PIONEER/art.png")}})));
++    QImage image(32, 32, QImage::Format_RGB32);
++    image.fill(Qt::blue);
++    ASSERT_TRUE(image.save(volume.filePath("PIONEER/art.png")));
++    auto session = std::make_shared<RekordboxUsbSession>(volume.path());
++    ASSERT_TRUE(session->load());
++    PausedBrowserPreviewReads paused;
++    RekordboxRuntimeTrackModel model(nullptr, trackCollectionManager());
++    model.showAllTracks(session);
++    model.requestArtworkPreview(model.index(0, 0));
++    QCoreApplication::processEvents();
++    session->invalidate();
++    auto reconnected = std::make_shared<RekordboxUsbSession>(volume.path());
++    ASSERT_TRUE(reconnected->load());
++    ASSERT_TRUE(reconnected->loadTrackAnalysis(1));
++    model.showAllTracks(reconnected);
++    int changes = 0;
++    QObject::connect(&model, &QAbstractItemModel::dataChanged, &model, [&] { ++changes; });
++    paused.resume();
++    QThreadPool::globalInstance()->waitForDone();
++    QCoreApplication::processEvents();
++    EXPECT_EQ(nullptr, model.artworkPreview(model.index(0, 0)));
++    EXPECT_EQ(0, changes);
++    model.requestArtworkPreview(model.index(0, 0));
++    ASSERT_TRUE(waitForBrowserPreview([&] { return model.artworkPreview(model.index(0, 0)) != nullptr; }));
++    EXPECT_EQ(QColor(Qt::blue), model.artworkPreview(model.index(0, 0))->pixelColor(16, 16));
++}
++
+ TEST_F(RekordboxRuntimeTrackModelTest, ListReadsProgressivelyRefreshPreviewsWithoutDeckLoads) {
+     QTemporaryDir volume;
+     Rows data;
+@@ -685,7 +833,7 @@
+     EXPECT_EQ(RuntimeAnalysisState::Unknown, catalog->findTrack(5)->analysisState);
+ }
+ 
+-TEST_F(RekordboxRuntimeTrackModelTest, ListSwitchDropsQueuedReadsAndStalePreviewCompletions) {
++TEST_F(RekordboxRuntimeTrackModelTest, ListSwitchDropsQueuedReadsAndRetainsCompletedPreviews) {
+     QTemporaryDir volume;
+     Rows data;
+     for (int id = 1; id <= 3; ++id) {
+@@ -713,7 +861,7 @@
+                     EXPECT_NE(nullptr, model.waveformPreview(first, WaveformMode::Blue));
+                 } else {
+                     EXPECT_EQ(1, first.row());
+-                    EXPECT_EQ(nullptr, model.waveformPreview(first, WaveformMode::ThreeBand));
++                    EXPECT_NE(nullptr, model.waveformPreview(first, WaveformMode::ThreeBand));
+                 }
+             });
+     model.requestWaveformPreview(model.index(0, 0), WaveformMode::Blue);
+@@ -724,9 +872,9 @@
+     EXPECT_GE(changes, 1);
+     EXPECT_EQ(RuntimeAnalysisState::Unknown, catalog->findTrack(2)->analysisState);
+     EXPECT_EQ(nullptr, model.waveformPreview(model.index(0, 0), WaveformMode::ThreeBand));
+-    // Track 1 also occurs in the new list: its old generation's decoded
+-    // preview must not enter this view's cache even though its ID still fits.
+-    EXPECT_EQ(nullptr, model.waveformPreview(model.index(1, 0), WaveformMode::ThreeBand));
++    // Track 1 still belongs to this connection. Completed work can be reused
++    // after a list reset, while notifications never address stale row indices.
++    EXPECT_NE(nullptr, model.waveformPreview(model.index(1, 0), WaveformMode::ThreeBand));
+     const auto* preview = model.waveformPreview(model.index(0, 0), WaveformMode::Blue);
+     ASSERT_NE(nullptr, preview);
+     EXPECT_EQ(QByteArray("PWV4"), preview->tag);
+diff --git a/src/widget/wtracktableview.cpp b/src/widget/wtracktableview.cpp
+--- a/src/widget/wtracktableview.cpp
++++ b/src/widget/wtracktableview.cpp
+@@ -1575,8 +1575,8 @@
+     const auto* tm = getTrackModel();
+     if (!tm) return;
+     const bool search=property("rx3SearchTracks").toBool();
+-    const QStringList fields = search ? QStringList{LIBRARYTABLE_PREVIEW,LIBRARYTABLE_TITLE} : m_rx3ExpandedTracks
+-            ? QStringList{LIBRARYTABLE_PREVIEW, LIBRARYTABLE_TITLE,
++    const QStringList fields = search ? QStringList{LIBRARYTABLE_PREVIEW,LIBRARYTABLE_COVERART,LIBRARYTABLE_TITLE} : m_rx3ExpandedTracks
++            ? QStringList{LIBRARYTABLE_PREVIEW, LIBRARYTABLE_COVERART, LIBRARYTABLE_TITLE,
+                     LIBRARYTABLE_ARTIST, LIBRARYTABLE_BPM, LIBRARYTABLE_GENRE}
+             : QStringList{LIBRARYTABLE_PREVIEW, LIBRARYTABLE_COVERART,
+                     LIBRARYTABLE_TRACKNUMBER, LIBRARYTABLE_TITLE, LIBRARYTABLE_ARTIST};
+@@ -1601,7 +1601,8 @@
+             const int c=tm->fieldIndex(field);
+             if(c<0) continue;
+             horizontalHeader()->moveSection(horizontalHeader()->visualIndex(c),position++);
+-            horizontalHeader()->resizeSection(c,field==LIBRARYTABLE_PREVIEW ? preview : qMax(1,viewport()->width()-preview));
++            horizontalHeader()->resizeSection(c, field == LIBRARYTABLE_PREVIEW ? preview
++                    : field == LIBRARYTABLE_COVERART ? row : qMax(1, viewport()->width()-preview-row));
+         }
+         return;
+     }
+@@ -1616,7 +1617,7 @@
+                 qRound(74 * scale));
+         const int genre = bpm * 2;
+         const int preview = qBound(qRound(110*scale), viewport()->width()/5, qRound(208*scale));
+-        const int flexible = qMax(0, viewport()->width() - preview - bpm - genre - 4);
++        const int flexible = qMax(0, viewport()->width() - preview - row - bpm - genre - 4);
+         const int title = qRound(flexible * 0.55);
+         const int artist = flexible - title;
+         for (const auto& field : fields) {
+@@ -1624,6 +1625,7 @@
+             if (c < 0) continue;
+             horizontalHeader()->moveSection(horizontalHeader()->visualIndex(c), position++);
+             const int width = field == LIBRARYTABLE_PREVIEW ? preview
++                    : field == LIBRARYTABLE_COVERART ? row
+                     : field == LIBRARYTABLE_TITLE ? title
+                     : field == LIBRARYTABLE_ARTIST ? artist
+                     : field == LIBRARYTABLE_BPM ? bpm : genre;

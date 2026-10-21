@@ -4,6 +4,8 @@
 
 - Update USB play history incrementally by session and track ID instead of rescanning every played track and catalog each second. Preserve playback order, deduplication, save retries and device replacement isolation.
 
+- Retain browser waveform and artwork caches across playlist, search and screen changes. Adapt their byte budgets to total and available RAM, evict old entries under pressure, and show USB artwork in regular, expanded and search track lists.
+
 - Keep GUI USB state queries responsive during rating, playlist/history and performance saves. Serialize PDB validation with writes, reject revoked commits, and avoid publishing stale save results after disconnection.
 
 - Project USB tracks off the GUI thread for LOAD, double-click, headphone touch preview and CONTINUE. Discard superseded or disconnected requests, recheck playing-deck protection, and prevent released previews from starting late.
