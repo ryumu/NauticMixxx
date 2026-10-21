@@ -2,7 +2,7 @@ diff --git a/src/widget/wrx3smartfx.h b/src/widget/wrx3smartfx.h
 new file mode 100644
 --- /dev/null
 +++ b/src/widget/wrx3smartfx.h
-@@ -0,0 +1,225 @@
+@@ -0,0 +1,224 @@
 +#pragma once
 +
 +#include <QActionGroup>
@@ -41,8 +41,8 @@ new file mode 100644
 +            if (m_active) loadPreset();
 +            refreshMenuSelection();
 +        });
-+        addControl("knob1", 0.5, [this](double value) { setKnob(0, value); });
-+        addControl("knob2", 0.5, [this](double value) { setKnob(1, value); });
++        addControl("knob1", 0.5, [this](double) { if (m_active) applyKnob(0); });
++        addControl("knob2", 0.5, [this](double) { if (m_active) applyKnob(1); });
 +        addControl("preset_open", 0, [this](double value) { if (value > 0) showPresets(); });
 +        addControl("available", effects ? 1 : 0, [](double) {});
 +    }
@@ -153,14 +153,14 @@ new file mode 100644
 +            applyKnob(deck);
 +        }
 +    }
-+    void setKnob(int deck, double value) {
-+        if (!std::isfinite(value)) return;
-+        m_knobs[deck] = qBound(0.0, value, 1.0);
-+        if (m_active) applyKnob(deck);
-+    }
 +    void applyKnob(int deck) {
 +        auto chain = m_saved[deck].chain;
-+        const double position = m_knobs[deck];
++        // Read the latest received position, including on activation/preset
++        // load. Queued controller notifications may still carry older values.
++        const double value = ControlObject::get(ConfigKey(group(),
++                QString("knob%1").arg(deck + 1)));
++        if (!std::isfinite(value)) return;
++        const double position = qBound(0.0, value, 1.0);
 +        // The center detent can report either adjacent MIDI step.
 +        const double amount = qBound(0.0, (std::abs(position - 0.5) - 0.005) / 0.495, 1.0);
 +        const auto filter = chain->getEffectSlot(0);
@@ -223,7 +223,6 @@ new file mode 100644
 +    QWidget* m_parent;
 +    bool m_active = false;
 +    int m_preset = 0;
-+    std::array<double, 2> m_knobs{{0.5, 0.5}};
 +    std::array<SavedChain, 2> m_saved;
 +    std::vector<std::unique_ptr<ControlObject>> m_controls;
 +    QPointer<QMenu> m_menu;
@@ -251,10 +250,11 @@ diff --git a/src/widget/wrx3beatfx.h b/src/widget/wrx3beatfx.h
 diff --git a/src/test/rx3beatfx_test.cpp b/src/test/rx3beatfx_test.cpp
 --- a/src/test/rx3beatfx_test.cpp
 +++ b/src/test/rx3beatfx_test.cpp
-@@ -13,6 +13,10 @@
+@@ -13,6 +13,11 @@
  #include "widget/wrx3beatfx.h"
  #include "widget/weffectselector.h"
  #include "skin/legacy/skincontext.h"
++#include <thread>
 +#include "skin/legacy/legacyskinparser.h"
 +#include "controllers/controllermanager.h"
 +#include "controllers/keyboard/keyboardeventfilter.h"
@@ -262,7 +262,7 @@ diff --git a/src/test/rx3beatfx_test.cpp b/src/test/rx3beatfx_test.cpp
  #include "widget/wwidgetgroup.h"
  #include "widget/wnumber.h"
 
-@@ -98,6 +102,254 @@
+@@ -98,6 +103,303 @@
      std::unique_ptr<EffectsManager> effects;
      EffectSlotPointer slot;
  };
@@ -283,6 +283,48 @@ diff --git a/src/test/rx3beatfx_test.cpp b/src/test/rx3beatfx_test.cpp
 +        return effects->getEffectChain(WRx3SmartFx::quickGroup(deck));
 +    }
 +};
++
++TEST_F(Rx3SmartFxTest, ReactivationUsesCurrentKnobsBeforeQueuedMidiNotifications) {
++    QWidget parent;
++    WRx3BeatFx panel(config(), effects.get(), &parent);
++    set("preset", 2);
++    set("knob1", 0.1);
++    set("knob2", 0.9);
++    set("enabled", 1);
++    for (double position : {0.85, 0.15, 0.5}) {
++        set("enabled", 0);
++        const double previousSuper1 = quick(0)->getSuperParameter();
++        const double previousSuper2 = quick(1)->getSuperParameter();
++        // Controller events arrive on another thread. Their control values
++        // are current even if the GUI has not handled the notifications yet.
++        std::thread controller([&] {
++            set("knob1", 1 - position);
++            set("knob2", position);
++            set("knob1", position);
++            set("knob2", 1 - position);
++        });
++        controller.join();
++        EXPECT_DOUBLE_EQ(previousSuper1, quick(0)->getSuperParameter());
++        EXPECT_DOUBLE_EQ(previousSuper2, quick(1)->getSuperParameter());
++        set("enabled", 1);
++        const auto expectCurrentPositions = [&] {
++            for (int deck = 0; deck < 2; ++deck) {
++                const double current = deck == 0 ? position : 1 - position;
++                const double amount = qBound(0.0, (std::abs(current - 0.5) - 0.005) / 0.495, 1.0);
++                const auto filter = quick(deck)->getEffectSlot(0);
++                EXPECT_DOUBLE_EQ(current < 0.5 ? 22050 * std::pow(200.0 / 22050, amount) : 22050,
++                        rx3FxParameter(filter, "lpf")->getValue());
++                EXPECT_DOUBLE_EQ(current > 0.5 ? 13 * std::pow(4000.0 / 13, amount) : 13,
++                        rx3FxParameter(filter, "hpf")->getValue());
++                EXPECT_DOUBLE_EQ(amount > 0 ? 1 : 0,
++                        ControlObject::get(ConfigKey(quick(deck)->group(), "enabled")));
++            }
++        };
++        expectCurrentPositions();
++        QCoreApplication::processEvents();
++        expectCurrentPositions();
++    }
++}
 +
 +TEST_F(Rx3SmartFxTest, SkinBadgeTogglesWithOneTapAndSelectsPresetsInPlace) {
 +    const QString skinDir = qEnvironmentVariable("NAUTIC_SKIN_DIR");
@@ -312,7 +354,7 @@ diff --git a/src/test/rx3beatfx_test.cpp b/src/test/rx3beatfx_test.cpp
 +    QSet<ControlObject*> skinControls;
 +    ConfigObject<ConfigValueKbd> keyboardConfig(directory.filePath("keyboard.cfg"));
 +    KeyboardEventFilter keyboard(&keyboardConfig);
-+    ControllerManager controllers(config());
++    ControllerManager controllers(config(), ControllerManager::DeviceDiscovery::Disabled);
 +    LegacySkinParser parser(config(), &skinControls, &keyboard, nullptr, &controllers,
 +            nullptr, nullptr, effects.get(), nullptr);
 +    auto* canvas = parser.parseSkin(directory.path(), &parent);
@@ -426,12 +468,17 @@ diff --git a/src/test/rx3beatfx_test.cpp b/src/test/rx3beatfx_test.cpp
 +TEST_F(Rx3SmartFxTest, PresetMenuSelectsWithoutEnablingAndPersistsSelection) {
 +    QWidget parent;
 +    parent.resize(600, 400); parent.show();
++    // Initialize Qt's global mouse position before the first popup. The
++    // offscreen platform has no window-system mouse events to do this for us.
++    QTest::mouseMove(parent.windowHandle(), QPoint(10, 10));
 +    {
 +        WRx3BeatFx panel(config(), effects.get(), &parent);
 +        set("preset_open", 1); set("preset_open", 0);
 +        auto* menu = parent.findChild<QMenu*>("RX3SmartFxPresets");
 +        ASSERT_TRUE(menu);
 +        ASSERT_EQ(3, menu->actions().size());
++        QCoreApplication::processEvents();
++        ASSERT_TRUE(menu->isVisible());
 +        EXPECT_EQ("FILTER", menu->actions().at(2)->text());
 +        EXPECT_TRUE(menu->actions().at(0)->isChecked());
 +        QTest::mouseClick(menu, Qt::LeftButton, Qt::NoModifier,
@@ -442,6 +489,8 @@ diff --git a/src/test/rx3beatfx_test.cpp b/src/test/rx3beatfx_test.cpp
 +        EXPECT_EQ("org.mixxx.effects.reverb", quick(0)->getEffectSlot(1)->id());
 +        EXPECT_EQ("org.mixxx.effects.reverb", quick(1)->getEffectSlot(1)->id());
 +        set("preset_open", 1); set("preset_open", 0);
++        QCoreApplication::processEvents();
++        ASSERT_TRUE(menu->isVisible());
 +        EXPECT_TRUE(menu->actions().at(1)->isChecked());
 +        QTest::mouseClick(menu, Qt::LeftButton, Qt::NoModifier,
 +                menu->actionGeometry(menu->actions().at(2)).center());
@@ -517,3 +566,59 @@ diff --git a/src/test/rx3beatfx_test.cpp b/src/test/rx3beatfx_test.cpp
 
  TEST_F(Rx3BeatFxTest, FourRegistrationsPersistWithoutReplacingOccupiedSlots) {
      QWidget parent;
+diff --git a/src/controllers/controllermanager.h b/src/controllers/controllermanager.h
+--- a/src/controllers/controllermanager.h
++++ b/src/controllers/controllermanager.h
+@@ -23,7 +23,9 @@
+ class ControllerManager : public QObject {
+     Q_OBJECT
+   public:
+-    ControllerManager(UserSettingsPointer pConfig);
++    enum class DeviceDiscovery { Enabled, Disabled };
++    ControllerManager(UserSettingsPointer pConfig,
++            DeviceDiscovery deviceDiscovery = DeviceDiscovery::Enabled);
+     virtual ~ControllerManager();
+
+     static const mixxx::Duration kPollInterval;
+@@ -88,4 +90,5 @@
+     QSharedPointer<MappingInfoEnumerator> m_pMainThreadUserMappingEnumerator;
+     QSharedPointer<MappingInfoEnumerator> m_pMainThreadSystemMappingEnumerator;
+     bool m_skipPoll;
++    const DeviceDiscovery m_deviceDiscovery;
+ };
+diff --git a/src/controllers/controllermanager.cpp b/src/controllers/controllermanager.cpp
+--- a/src/controllers/controllermanager.cpp
++++ b/src/controllers/controllermanager.cpp
+@@ -131,7 +131,8 @@
+     return a->getName() < b->getName();
+ }
+
+-ControllerManager::ControllerManager(UserSettingsPointer pConfig)
++ControllerManager::ControllerManager(UserSettingsPointer pConfig,
++        DeviceDiscovery deviceDiscovery)
+         : QObject(),
+           m_pConfig(pConfig),
+           // WARNING: Do not parent m_pControllerLearningEventFilter to
+@@ -140,7 +141,8 @@
+           m_pControllerLearningEventFilter(new ControllerLearningEventFilter()),
+           m_pollTimer(this),
+           m_discoveryTimer(this),
+-          m_skipPoll(false) {
++          m_skipPoll(false),
++          m_deviceDiscovery(deviceDiscovery) {
+     qRegisterMetaType<std::shared_ptr<LegacyControllerMapping>>(
+             "std::shared_ptr<LegacyControllerMapping>");
+
+@@ -199,6 +201,12 @@
+             new MappingInfoEnumerator(userMappingsPath(m_pConfig)));
+     m_pMainThreadSystemMappingEnumerator = QSharedPointer<MappingInfoEnumerator>(
+             new MappingInfoEnumerator(resourceMappingsPath(m_pConfig)));
++
++    // Skin tests need the learning event filter and mapping parsers, without
++    // accessing physical MIDI/HID/USB devices or starting discovery timers.
++    if (m_deviceDiscovery == DeviceDiscovery::Disabled) {
++        return;
++    }
+
+     // Instantiate all enumerators. Enumerators can take a long time to
+     // construct since they interact with host MIDI APIs.

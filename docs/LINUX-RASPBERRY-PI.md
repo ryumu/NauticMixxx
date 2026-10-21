@@ -96,11 +96,25 @@ of the BROWSE header to show or hide the application menu bar. This also works i
 fullscreen and preserves the auto-hide preference; no keyboard is needed.
 The browser's separate **MENU** button opens UTILITY.
 
-Optional desktop menu entry (keep the staged folder in its final location first):
+For a desktop shortcut and application-menu entry that follow repository builds:
 
 ```sh
-"./build/test-candidate/$(cat VERSION)-linux-$(uname -m)/stage/bin/nauticmixxx" --install-desktop
+python3 packaging/linux/desktop.py --install-desktop
 ```
+
+Install this shortcut once. It opens the last successfully published Linux build,
+including after a version change or a different `RX3_BUILD_ROOT`. The build script
+configures a CMake hook, so subsequent `cmake --build /path/to/native --target mixxx`
+commands also update its executable, skin and bundled controller mappings. Failed
+compilation leaves the previous published app available. An initial build is
+published after its resources have been installed.
+
+On launch, bundled controller files are refreshed in the existing profile. Their
+previous contents are retained under `controllers/.nautic-backups`; custom files
+with other names, preferences, effect settings and the library database are kept.
+
+For a standalone staged package, its own desktop-menu installer remains available:
+`stage/bin/nauticmixxx --install-desktop`.
 
 The stage can be moved as a whole. It depends on the host distribution's shared
 libraries and Python 3; it is **not an AppImage or universal installer**. An Ubuntu

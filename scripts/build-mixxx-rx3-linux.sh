@@ -42,6 +42,7 @@ python3 "$project/packaging/linux/prepare-branding.py" "$source_tree" "$project"
 cmake -S "$source_tree" -B "$work/native" -G Ninja \
   -DCMAKE_BUILD_TYPE="$build_type" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+  -DCMAKE_PROJECT_INCLUDE="$project/packaging/linux/desktop-build.cmake" \
   -DNAUTICMIX_VERSION="$(cat "$project/VERSION")" \
   -DCMAKE_INSTALL_PREFIX="$work/stage" -DCMAKE_INSTALL_LIBDIR=lib \
   -DQT6=ON -DQML=OFF -DOPTIMIZE=portable -DENGINEPRIME=OFF -DKEYFINDER=OFF \
@@ -56,4 +57,5 @@ if [ "$tests" = ON ]; then
 fi
 cmake --install "$work/native"
 python3 "$project/packaging/linux/stage-package.py" "$work/stage" "$source_tree" "$project"
+python3 "$project/packaging/linux/desktop.py" --register-build "$work"
 printf '\nBuilt NauticMixxx for %s. Start from a desktop session:\n  "%s/stage/bin/nauticmixxx"\n' "$(uname -m)" "$work"

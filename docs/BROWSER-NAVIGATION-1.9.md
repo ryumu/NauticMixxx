@@ -17,9 +17,12 @@ USB entry shows the first category immediately. Turning the browser encoder
 changes categories and previews content while keeping blue category focus.
 Pressing enters the adjacent list. Touching a category enters that list directly
 and leaves the category gray. Native keyboard navigation and touch-synthesized
-mouse input use the same views. Double-tap a playlist to open its expanded track
-list; controller ENTER opens the selected playlist. BACK moves through playlist
-folders, content, categories, and SOURCE. Tapping the header title also performs BACK.
+mouse input use the same views. Tap a folder or playlist to select and preview it.
+Tap the already selected item again to open it; there is no double-tap time limit.
+Items selected by the encoder, automatically on folder entry, or restored by BACK
+also open on the next tap. Controller ENTER opens the selected folder or playlist. The visible ◀ BACK button
+moves through playlist folders, content, categories, and SOURCE, and remains
+available during search. Tapping the header title also performs BACK.
 Touch scrolling is enabled on the content views.
 
 PLAYLIST has a folder/playlist column and a single adjacent track-title column.
@@ -45,6 +48,14 @@ SEARCH opens the touch keyboard (ABC/123, backspace, CLEAR, SPACE), a compact
 waveform/title results view and INFO. Empty queries show no rows. Physical
 keyboard input remains supported. Controller rotation selects results; loading
 remains deck-specific. BACK closes search and restores category navigation.
+
+Rekordbox track lists publish their titles immediately, then inspect the listed
+tracks' ANLZ files sequentially in the background. Visible waveform requests
+take priority and each ready row refreshes without a deck load. Duplicate
+playlist entries share previews; missing or corrupt waveforms remain blank.
+Changing lists cancels queued reads, and results from a previous list or revoked
+USB session cannot populate the current view. Analysis stays in the USB session;
+decoded previews use a bounded cache and offscreen rows decode when displayed.
 
 One header and twelve rows fill each track table. Integer rounding pixels are
 absorbed by the header, so even at different heights the thirteenth row cannot

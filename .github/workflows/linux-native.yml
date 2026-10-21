@@ -42,6 +42,7 @@ jobs:
         run: |
           python3 scripts/release-audit.py
           python3 scripts/test-linux-package.py
+          python3 scripts/test-linux-desktop.py
           python3 scripts/test-pioneer-roland-presets.py
           node scripts/test-pioneer-roland-browser.js
           node scripts/test-rx3-jog-bend.js

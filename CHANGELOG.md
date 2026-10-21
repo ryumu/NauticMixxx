@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Restore DDJ-FLX4 Smart CFX LED feedback when the controller initializes before the native skin controls; attach feedback when they become available without resetting an active effect.
+
+- Keep Linux desktop shortcuts on the latest successfully published build across versions and build directories, including direct CMake builds. Refresh bundled controller mappings on launch with backups while preserving user settings and library data.
+
+- Make Smart CFX UI tests independent of physical controller discovery and initialize mouse input before opening the first headless preset menu.
+
+- Read Rekordbox analysis in the background when a playlist or track list opens, prioritize visible waveform previews, and refresh rows progressively without loading tracks to a deck. Cancel queued reads on list changes and discard stale or disconnected USB results.
+
+- Apply the latest DDJ-FLX4 knob positions immediately when Smart CFX is enabled, including movements made while off, without restoring stale positions from queued controller notifications.
+
+- Keep DDJ-FLX4 CFX knob movements from affecting audio while native Smart CFX is off; remember positions for the next activation.
+
+- Select and preview browser playlist folders and playlists with a tap or click; tap the selected item again to open it without a double-tap time limit. Add a visible ◀ BACK button, available during search, and restore parent folder titles when navigating back.
+
 - Add touch-accessible APP MENU buttons in PERFORMANCE and BROWSE to show or hide the application menu bar without a keyboard, including on Raspberry Pi.
 
 - Fit application windows to the available screen area and keep oversized operation dialogs scrollable, including on smaller or scaled displays.

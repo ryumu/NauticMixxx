@@ -49,6 +49,19 @@ with tempfile.TemporaryDirectory() as directory:
     launch.seed_profile(resources, profile)
     assert cfg.read_bytes() == saved, 'relaunch changed existing settings'
     assert database.read_bytes() == b'personal database fixture'
+    mapping = profile / 'controllers/Pioneer-DDJ-FLX4-script.js'
+    mapping.write_bytes(b'previous bundled script')
+    custom = profile / 'controllers/My-custom-controller.js'
+    custom.write_bytes(b'personal mapping')
+    effects = (profile / 'effects.xml').read_bytes()
+    launch.seed_profile(resources, profile)
+    assert mapping.read_bytes() == (resources / 'controllers' / mapping.name).read_bytes()
+    backups = list((profile / 'controllers/.nautic-backups').glob(mapping.name + '.*.bak'))
+    assert len(backups) == 1 and backups[0].read_bytes() == b'previous bundled script'
+    launch.seed_profile(resources, profile)
+    assert len(list((profile / 'controllers/.nautic-backups').glob('*.bak'))) == 1
+    assert cfg.read_bytes() == saved and (profile / 'effects.xml').read_bytes() == effects
+    assert custom.read_bytes() == b'personal mapping' and database.read_bytes() == b'personal database fixture'
     entry = launch.desktop_entry(prefix)
     assert f'Exec="{prefix}/bin/nauticmixxx"' in entry
     assert 'Name=NauticMixxx' in entry and 'nauticmixxx.png' in entry

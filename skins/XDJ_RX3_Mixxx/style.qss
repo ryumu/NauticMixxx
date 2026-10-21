@@ -3279,3 +3279,5 @@ QPushButton[rx3Bank="true"]:disabled { color: #777; }
 #RX3BrowserHeader #RX3BrowserLoad1:disabled, #RX3BrowserHeader #RX3BrowserLoad2:disabled { border-color: #444; color: #777; }
 #RX3BrowserHeader #RX3BrowserPerformance { border: 1px solid #777; }
 #RX3BrowserHeader #RX3BrowserAppMenu { border: 1px solid #777; }
+#RX3BrowserHeader #RX3BrowserBack { border: 1px solid #777; color: #fff; }
+#RX3BrowserHeader #RX3BrowserBack:pressed { background: #007CE0; }

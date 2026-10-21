@@ -175,6 +175,7 @@ PioneerDDJFLX4.timers = {};
 
 // Keep alive timer
 PioneerDDJFLX4.sendKeepAlive = function() {
+    PioneerDDJFLX4.connectSmartFx(false);
     midi.sendSysexMsg([0xF0, 0x00, 0x40, 0x05, 0x00, 0x00, 0x04, 0x05, 0x00, 0x50, 0x02, 0xf7], 12); // This was reverse engineered with Wireshark
 };
 
@@ -234,9 +235,13 @@ PioneerDDJFLX4.toggleLight = function(midiIn, active) {
 
 PioneerDDJFLX4.init = function() {
     PioneerDDJFLX4.cfxMSB = [undefined, undefined];
+    PioneerDDJFLX4.smartFxConnection = null;
+    PioneerDDJFLX4.smartFxStopped = false;
+    PioneerDDJFLX4.smartFxRetryTicks = 0;
+    PioneerDDJFLX4.smartFxRetryDelay = 1;
     if (PioneerDDJFLX4.nativeSmartFx()) {
         engine.setValue("[RX3SmartFx]", "enabled", 0);
-        engine.makeConnection("[RX3SmartFx]", "enabled", PioneerDDJFLX4.smartFxLight);
+        PioneerDDJFLX4.connectSmartFx(true);
     }
     PioneerDDJFLX4.smartFxLight();
     engine.setValue("[EffectRack1_EffectUnit1]", "show_focus", 1);
@@ -311,6 +316,25 @@ PioneerDDJFLX4.nativeSmartFx = function() {
     return engine.getValue("[RX3SmartFx]", "available") > 0;
 };
 
+PioneerDDJFLX4.connectSmartFx = function(force) {
+    if (PioneerDDJFLX4.smartFxStopped || PioneerDDJFLX4.smartFxConnection) return;
+    if (!force && PioneerDDJFLX4.smartFxRetryTicks > 0) {
+        --PioneerDDJFLX4.smartFxRetryTicks;
+        return;
+    }
+    if (!PioneerDDJFLX4.nativeSmartFx()) {
+        // The skin may create the native API after controller init. Retry
+        // from the existing keepalive, backing off when using a stock skin.
+        PioneerDDJFLX4.smartFxRetryTicks = PioneerDDJFLX4.smartFxRetryDelay;
+        PioneerDDJFLX4.smartFxRetryDelay = Math.min(25, PioneerDDJFLX4.smartFxRetryDelay * 2);
+        return;
+    }
+    PioneerDDJFLX4.smartFxConnection = engine.makeConnection(
+        "[RX3SmartFx]", "enabled", PioneerDDJFLX4.smartFxLight);
+    // Read the actual state; late attachment must not switch an active FX off.
+    PioneerDDJFLX4.smartFxLight();
+};
+
 PioneerDDJFLX4.smartFxLight = function() {
     midi.sendShortMsg(0x96, 0x00, PioneerDDJFLX4.nativeSmartFx() &&
         engine.getValue("[RX3SmartFx]", "enabled") > 0 ? 0x7F : 0);
@@ -318,12 +342,14 @@ PioneerDDJFLX4.smartFxLight = function() {
 
 PioneerDDJFLX4.smartFxPressed = function(_channel, _control, value, status) {
     if (value === 0 || (status & 0xF0) === 0x80 || !PioneerDDJFLX4.nativeSmartFx()) return;
+    PioneerDDJFLX4.connectSmartFx(true);
     engine.setValue("[RX3SmartFx]", "enabled",
         engine.getValue("[RX3SmartFx]", "enabled") > 0 ? 0 : 1);
 };
 
 PioneerDDJFLX4.smartFxPresetPressed = function(_channel, _control, value, status) {
     if (value === 0 || (status & 0xF0) === 0x80 || !PioneerDDJFLX4.nativeSmartFx()) return;
+    PioneerDDJFLX4.connectSmartFx(true);
     engine.setValue("[RX3SmartFx]", "preset_open", 1);
     engine.setValue("[RX3SmartFx]", "preset_open", 0);
 };
@@ -339,9 +365,11 @@ PioneerDDJFLX4.cfxKnobLSB = function(_channel, control, value, _status, group) {
     if (msb === undefined) return;
     const position = ((msb << 7) + value) / 0x3FFF;
     if (PioneerDDJFLX4.nativeSmartFx()) {
-        // Track both physical knob positions even while Smart CFX is off.
+        PioneerDDJFLX4.connectSmartFx(true);
+        // Track positions for the next activation; native Smart CFX ignores
+        // them while off. Never route native CFX knobs to the normal filter.
         engine.setValue("[RX3SmartFx]", "knob" + (deck + 1), position);
-        if (engine.getValue("[RX3SmartFx]", "enabled") > 0) return;
+        return;
     }
     engine.setParameter(group, "super1", position);
 };
@@ -926,7 +954,12 @@ PioneerDDJFLX4.quickJumpBack = function(_channel, _control, value, _status, grou
 //
 
 PioneerDDJFLX4.shutdown = function() {
+    PioneerDDJFLX4.smartFxStopped = true;
     if (PioneerDDJFLX4.nativeSmartFx()) engine.setValue("[RX3SmartFx]", "enabled", 0);
+    if (PioneerDDJFLX4.smartFxConnection) {
+        PioneerDDJFLX4.smartFxConnection.disconnect();
+        PioneerDDJFLX4.smartFxConnection = null;
+    }
     midi.sendShortMsg(0x96, 0x00, 0);
     // reset vumeter
     PioneerDDJFLX4.toggleLight(PioneerDDJFLX4.lights.deck1.vuMeter, false);

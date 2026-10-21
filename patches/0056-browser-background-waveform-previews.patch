@@ -1,0 +1,524 @@
+diff --git a/src/library/rekordbox/rekordboxruntimetrackmodel.cpp b/src/library/rekordbox/rekordboxruntimetrackmodel.cpp
+--- a/src/library/rekordbox/rekordboxruntimetrackmodel.cpp
++++ b/src/library/rekordbox/rekordboxruntimetrackmodel.cpp
+@@ -2,6 +2,7 @@
+
+ #include <QFileInfo>
+ #include <QFutureWatcher>
++#include <QTimer>
+ #include <QUrlQuery>
+ #include <QtConcurrentRun>
+
+@@ -154,8 +155,16 @@
+     ++m_previewGeneration;
+     m_waveformPreviewCache.clear();
+     m_pendingWaveformPreviews.clear();
++    m_previewRequests.clear();
++    m_analysisRequests.clear();
++    m_rowsByTrackId.clear();
+     m_session = std::move(session);
+     m_rows = std::move(rows);
++    for (int row = 0; row < m_rows.size(); ++row) {
++        const auto id = m_rows[row].rekordboxId;
++        if (!m_rowsByTrackId.contains(id)) m_analysisRequests.enqueue(id);
++        m_rowsByTrackId[id].append(row);
++    }
+     const auto state = m_session ? m_session->sessionState() : nullptr;
+     const auto sessionId = state
+             ? state->identifier().uuid().toString(QUuid::WithoutBraces)
+@@ -163,6 +172,7 @@
+     m_viewKey = QStringLiteral("rekordbox-usb:%1:%2")
+                         .arg(sessionId, std::move(viewKey));
+     endResetModel();
++    schedulePreviewRead();
+ }
+
+ int RekordboxRuntimeTrackModel::rowCount(const QModelIndex& parent) const {
+@@ -300,45 +310,82 @@
+ const WaveformSeries* RekordboxRuntimeTrackModel::waveformPreview(
+         const QModelIndex& index, WaveformMode mode) const {
+     const auto* track = trackAt(index);
+-    return track ? m_waveformPreviewCache.object(quint64(track->rekordboxId) * 3 + int(mode)) : nullptr;
++    const auto state = sessionState();
++    return track && state && state->isActive()
++            ? m_waveformPreviewCache.object(quint64(track->rekordboxId) * 3 + int(mode))
++            : nullptr;
+ }
+
+ void RekordboxRuntimeTrackModel::requestWaveformPreview(
+         const QModelIndex& index, WaveformMode mode) {
+     const auto* track = trackAt(index);
+-    if (!track || !m_session) return;
++    const auto state = sessionState();
++    if (!track || !state || !state->isActive()) return;
+     const quint32 rekordboxId = track->rekordboxId;
+-    // Painting/scrolling must not start analysis reads. Once a track has been
+-    // loaded, use its session analysis (the row snapshot predates that load).
+-    const auto catalog = m_session->catalog();
+-    const auto inspected = catalog ? catalog->findTrack(rekordboxId) : std::nullopt;
+-    if (!inspected || inspected->analysisState == RuntimeAnalysisState::Unknown) return;
+     const quint64 key = quint64(rekordboxId) * 3 + int(mode);
+     if (m_waveformPreviewCache.contains(key) || m_pendingWaveformPreviews.contains(key)) return;
+
+-    auto descriptors = inspected->waveforms;
+-    std::stable_sort(descriptors.begin(), descriptors.end(), [mode](const auto& a, const auto& b) {
+-        return previewWaveformPriority(a.sectionTag, mode) < previewWaveformPriority(b.sectionTag, mode);
+-    });
++    m_pendingWaveformPreviews.insert(key);
++    m_previewRequests.enqueue(qMakePair(rekordboxId, mode));
++    schedulePreviewRead();
++}
++
++void RekordboxRuntimeTrackModel::schedulePreviewRead() {
++    // Defer until the list is published and painting has queued visible rows.
++    // No USB file reads or analysis inspection run on the GUI/audio thread.
++    QTimer::singleShot(0, this, [this] { startNextPreviewRead(); });
++}
++
++void RekordboxRuntimeTrackModel::startNextPreviewRead() {
++    if (m_previewReadRunning) return;
++    const auto state = sessionState();
++    if (!state || !state->isActive()) {
++        m_previewRequests.clear();
++        m_analysisRequests.clear();
++        m_pendingWaveformPreviews.clear();
++        return;
++    }
++    const bool decodePreview = !m_previewRequests.isEmpty();
++    if (!decodePreview && m_analysisRequests.isEmpty()) return;
++    const auto request = decodePreview
++            ? m_previewRequests.dequeue()
++            : qMakePair(m_analysisRequests.dequeue(), WaveformMode::ThreeBand);
++    const auto rekordboxId = request.first;
++    const auto mode = request.second;
++    const quint64 key = quint64(rekordboxId) * 3 + int(mode);
+     const auto session = m_session;
+     const auto generation = m_previewGeneration;
+-    m_pendingWaveformPreviews.insert(key);
++    m_previewReadRunning = true;
+     auto* watcher = new QFutureWatcher<WaveformSeries>(this);
+     connect(watcher, &QFutureWatcher<WaveformSeries>::finished, this,
+-            [this, watcher, rekordboxId, key, generation] {
++            [this, watcher, rekordboxId, key, generation, decodePreview] {
+                 auto preview = watcher->result();
+                 watcher->deleteLater();
+-                if (generation != m_previewGeneration) return;
+-                m_pendingWaveformPreviews.remove(key);
+-                m_waveformPreviewCache.insert(key, new WaveformSeries(std::move(preview)));
+-                const int previewColumn = fieldIndex(ColumnCache::COLUMN_LIBRARYTABLE_PREVIEW);
+-                for (int row = 0; row < m_rows.size(); ++row) {
+-                    if (m_rows[row].rekordboxId == rekordboxId && previewColumn >= 0) {
+-                        emit dataChanged(this->index(row, previewColumn), this->index(row, previewColumn));
++                m_previewReadRunning = false;
++                const auto state = sessionState();
++                if (generation == m_previewGeneration && state && state->isActive()) {
++                    if (decodePreview) {
++                        m_pendingWaveformPreviews.remove(key);
++                        m_waveformPreviewCache.insert(key, new WaveformSeries(std::move(preview)));
++                    }
++                    const int column = fieldIndex(ColumnCache::COLUMN_LIBRARYTABLE_PREVIEW);
++                    if (column >= 0) {
++                        const auto rows = m_rowsByTrackId.value(rekordboxId);
++                        for (const auto row : rows) {
++                            if (generation != m_previewGeneration) break;
++                            emit dataChanged(index(row, column), index(row, column));
++                        }
+                     }
+                 }
++                schedulePreviewRead();
+             });
+-    watcher->setFuture(QtConcurrent::run([session, descriptors] {
++    watcher->setFuture(QtConcurrent::run([session, rekordboxId, mode, decodePreview] {
++        const auto inspected = session->loadTrackAnalysis(rekordboxId);
++        if (!inspected || !decodePreview) return WaveformSeries{};
++        auto descriptors = inspected->waveforms;
++        std::stable_sort(descriptors.begin(), descriptors.end(), [mode](const auto& a, const auto& b) {
++            return previewWaveformPriority(a.sectionTag, mode) < previewWaveformPriority(b.sectionTag, mode);
++        });
+         for (const auto& descriptor : descriptors) {
+             QString error;
+             auto payload = session->loadWaveformPayload(descriptor, &error);
+diff --git a/src/library/rekordbox/rekordboxruntimetrackmodel.h b/src/library/rekordbox/rekordboxruntimetrackmodel.h
+--- a/src/library/rekordbox/rekordboxruntimetrackmodel.h
++++ b/src/library/rekordbox/rekordboxruntimetrackmodel.h
+@@ -3,6 +3,7 @@
+ #include <QCache>
+ #include <QHash>
+ #include <QList>
++#include <QQueue>
+ #include <QSet>
+
+ #include <memory>
+@@ -59,9 +60,10 @@
+     bool updateTrackMood(Track* pTrack, const QString& mood) const override;
+ #endif
+
+-    // Browser waveform previews are loaded lazily and asynchronously from the
+-    // session. nullptr means not ready yet; an empty vector means that no
+-    // supported/valid preview is available. The cache is session-scoped and
++    // List activation inspects analysis in the background; visible waveform
++    // requests take priority over the remaining rows. nullptr means not ready
++    // yet; empty columns mean no supported/valid preview is available.
++    // The cache is session-scoped and
+     // never enters SQL or the persistent Track model.
+     const WaveformSeries* waveformPreview(
+             const QModelIndex& index, WaveformMode mode) const;
+@@ -76,6 +78,8 @@
+             QList<RuntimeTrack> rows,
+             QString viewKey);
+     const RuntimeTrack* trackAt(const QModelIndex& index) const;
++    void startNextPreviewRead();
++    void schedulePreviewRead();
+
+     std::shared_ptr<RekordboxUsbSession> m_session;
+     QList<RuntimeTrack> m_rows;
+@@ -85,6 +89,12 @@
+     QString m_viewKey{QStringLiteral("rekordbox-usb:empty")};
+     QCache<quint64, WaveformSeries> m_waveformPreviewCache{128};
+     QSet<quint64> m_pendingWaveformPreviews;
++    QQueue<QPair<quint32, WaveformMode>> m_previewRequests;
++    QQueue<quint32> m_analysisRequests;
++    QHash<quint32, QList<int>> m_rowsByTrackId;
++    // Keep one read in flight even across model resets. A stale completion
++    // releases the worker before starting work for the new list.
++    bool m_previewReadRunning{false};
+     quint64 m_previewGeneration{0};
+ };
+
+diff --git a/src/library/rekordbox/rekordboxusbsession.cpp b/src/library/rekordbox/rekordboxusbsession.cpp
+--- a/src/library/rekordbox/rekordboxusbsession.cpp
++++ b/src/library/rekordbox/rekordboxusbsession.cpp
+@@ -199,8 +199,8 @@
+         track.resolvedAudioPath = resolveTrackPath(root, track.audioRelativePath, &track);
+         track.resolvedAnlzPath = resolveTrackPath(root, track.anlzRelativePath, &track);
+         track.resolvedArtworkPath = resolveTrackPath(root, track.artworkRelativePath, &track);
+-        // Keep initial browsing metadata-only, regardless of the USB's track
+-        // count. ANLZ files are inspected only when this track is loaded.
++        // Publish metadata before reading ANLZ, regardless of USB track count.
++        // The active list inspects its rows in the background after publication.
+         if (!catalog->insertTrack(std::move(track))) {
+             catalog->appendDiagnostic(QStringLiteral("Track %1 omitted: catalog identity/path conflict").arg(source.id));
+         }
+@@ -632,8 +632,8 @@
+     if (error) {
+         error->clear();
+     }
+-    // This is the first analysis I/O for the selected track. The loader also
+-    // revalidates the PDB identity before reusing any cached analysis.
++    // Reuse background list inspection when available. The loader revalidates
++    // the PDB identity before reusing any cached analysis.
+     const auto runtimeTrack = loadTrackAnalysis(rekordboxId, error);
+     if (!runtimeTrack) return {};
+     std::shared_ptr<const SessionState> sessionState;
+diff --git a/src/library/rekordbox/rekordboxusbsession.h b/src/library/rekordbox/rekordboxusbsession.h
+--- a/src/library/rekordbox/rekordboxusbsession.h
++++ b/src/library/rekordbox/rekordboxusbsession.h
+@@ -33,8 +33,8 @@
+     // invalidate() may cancel a load.
+     bool load();
+     bool refresh();
+-    // Explicit per-track inspection, on demand when projecting a track for
+-    // deck/headphone loading. Reuses session-local analysis; never scans other
++    // Per-track inspection for background list previews or deck/headphone
++    // loading. Reuses session-local analysis; never scans other
+     // tracks. Potentially expensive synchronous I/O, never on the audio thread.
+     std::optional<RuntimeTrack> loadTrackAnalysis(
+             quint32 rekordboxId, QString* error = nullptr);
+diff --git a/src/test/rekordboxusbsession_test.cpp b/src/test/rekordboxusbsession_test.cpp
+--- a/src/test/rekordboxusbsession_test.cpp
++++ b/src/test/rekordboxusbsession_test.cpp
+@@ -9,6 +9,9 @@
+ #include <QElapsedTimer>
+ #include <QCoreApplication>
+ #include <QThread>
++#include <QThreadPool>
++#include <QSemaphore>
++#include <QtConcurrentRun>
+ #include <QDir>
+ #include <QDirIterator>
+ #include <QFile>
+@@ -306,6 +309,64 @@
+
+ class RekordboxRuntimeTrackModelTest : public LibraryTest {};
+
++template<typename Predicate>
++bool waitForBrowserPreview(Predicate ready) {
++    QElapsedTimer timer;
++    timer.start();
++    while (!ready() && timer.elapsed() < 5000) {
++        QCoreApplication::processEvents();
++        QThread::msleep(1);
++    }
++    return ready();
++}
++
++// Hold QtConcurrent work until a model reset/invalidation is in place, so the
++// stale-completion tests do not depend on disk speed or thread scheduling.
++class PausedBrowserPreviewReads {
++  public:
++    PausedBrowserPreviewReads()
++            : m_pool(QThreadPool::globalInstance()), m_maxThreads(m_pool->maxThreadCount()) {
++        m_pool->waitForDone();
++        m_pool->setMaxThreadCount(1);
++        m_blocker = QtConcurrent::run([this] { m_gate.acquire(); });
++    }
++    ~PausedBrowserPreviewReads() {
++        resume();
++        m_pool->waitForDone();
++    }
++    void resume() {
++        if (!m_paused) return;
++        m_paused = false;
++        m_gate.release();
++        m_blocker.waitForFinished();
++        m_pool->setMaxThreadCount(m_maxThreads);
++    }
++  private:
++    QThreadPool* m_pool;
++    int m_maxThreads;
++    QSemaphore m_gate;
++    QFuture<void> m_blocker;
++    bool m_paused{true};
++};
++
++QByteArray syntheticBrowserPreview(const QString& owner) {
++    auto analysis = syntheticCueAnlz(owner);
++    for (const auto& tag : {QByteArray("PWV4"), QByteArray("PWV6")}) {
++        const int header = tag == "PWV4" ? 24 : 20;
++        const int stride = tag == "PWV4" ? 6 : 3;
++        QByteArray section(header, '\0');
++        section.replace(0, 4, tag);
++        putAnlz32(&section, 4, header);
++        putAnlz32(&section, 12, stride);
++        putAnlz32(&section, 16, 2);
++        section += QByteArray(stride * 2, char(100));
++        putAnlz32(&section, 8, section.size());
++        analysis += section;
++    }
++    putAnlz32(&analysis, 8, analysis.size());
++    return analysis;
++}
++
+ // No Library backend is needed for the metadata-only selection/tick boundary.
+ class MetadataOnlyUsbTable : public WTrackTableView {
+   public:
+@@ -362,7 +423,7 @@
+     EXPECT_FALSE(model.getTrack(model.index(0, 0)));
+ }
+
+-TEST_F(RekordboxRuntimeTrackModelTest, ThousandTracksBrowseWithoutInspectingAnalysis) {
++TEST_F(RekordboxRuntimeTrackModelTest, ThousandTracksOpenImmediatelyAndInspectOnlyTheCurrentList) {
+     QTemporaryDir volume;
+     Rows data;
+     for (int id = 1; id <= 1000; ++id) {
+@@ -411,11 +472,16 @@
+     QThread::msleep(120);
+     ASSERT_TRUE(QMetaObject::invokeMethod(&table, "slotGuiTick50ms", Qt::DirectConnection, Q_ARG(double, 0.05)));
+     EXPECT_EQ(1, metadataSelections);
+-    QCoreApplication::processEvents();
++    // Publishing/selecting the list is still metadata-only. Background reads
++    // begin after returning to the event loop, for the current playlist only.
+     for (const auto& metadata : catalog->tracks())
+         EXPECT_EQ(RuntimeAnalysisState::Unknown, metadata.analysisState);
+-
+-    // Projection is the first analysis read, and is confined to this one track.
++    ASSERT_TRUE(waitForBrowserPreview([&] {
++        return catalog->findTrack(500)->analysisState != RuntimeAnalysisState::Unknown &&
++                catalog->findTrack(1000)->analysisState != RuntimeAnalysisState::Unknown;
++    }));
++
++    // Deck loading reuses the background inspection without importing rows.
+     const auto projected = model.getTrack(model.index(0, 0));
+     ASSERT_TRUE(projected);
+     EXPECT_EQ(500u, projected->getSourceBinding().rekordboxId());
+@@ -427,10 +493,10 @@
+     int inspected = 0;
+     for (const auto& metadata : catalog->tracks())
+         if (metadata.analysisState != RuntimeAnalysisState::Unknown) ++inspected;
+-    EXPECT_EQ(1, inspected);
++    EXPECT_EQ(2, inspected);
+     EXPECT_TRUE(session->createTemporaryTrack(500));
+     EXPECT_EQ(4, catalog->findTrack(500)->cues.size());
+-    EXPECT_EQ(RuntimeAnalysisState::Unknown, catalog->findTrack(1000)->analysisState);
++    EXPECT_EQ(RuntimeAnalysisState::Ready, catalog->findTrack(1000)->analysisState);
+ }
+
+ TEST(RekordboxUsbSessionTest, DeferredAnalysisReadsAtFirstLoadAndKeepsMetadataUpdates) {
+@@ -526,19 +592,7 @@
+ TEST_F(RekordboxRuntimeTrackModelTest, BrowserPreviewCacheSeparatesStylesAndClearsWithSession) {
+     QTemporaryDir volume;
+     ASSERT_TRUE(write(pdb(volume), database(rows())));
+-    QByteArray analysis(28, '\0');
+-    analysis.replace(0,4,"PMAI"); putAnlz32(&analysis,4,28);
+-    analysis += anlzPpth(QStringLiteral("/Contents/test.mp3"));
+-    for (const auto& tag : {QByteArray("PWV4"), QByteArray("PWV6")}) {
+-        const int header = tag == "PWV4" ? 24 : 20;
+-        const int stride = tag == "PWV4" ? 6 : 3;
+-        QByteArray section(header, '\0');
+-        section.replace(0,4,tag); putAnlz32(&section,4,header);
+-        putAnlz32(&section,12,stride); putAnlz32(&section,16,2);
+-        section += QByteArray(stride*2, char(100));
+-        putAnlz32(&section,8,section.size()); analysis += section;
+-    }
+-    putAnlz32(&analysis,8,analysis.size());
++    const auto analysis = syntheticBrowserPreview(QStringLiteral("/Contents/test.mp3"));
+     ASSERT_TRUE(write(volume.filePath("PIONEER/USBANLZ/test.DAT"),analysis));
+     auto session = std::make_shared<RekordboxUsbSession>(volume.path());
+     ASSERT_TRUE(session->load());
+@@ -547,9 +601,6 @@
+     const auto index = model.index(0,0);
+     model.requestWaveformPreview(index, WaveformMode::ThreeBand);
+     EXPECT_EQ(RuntimeAnalysisState::Unknown, session->catalog()->findTrack(1)->analysisState);
+-    const auto inspected = session->loadTrackAnalysis(1);
+-    ASSERT_TRUE(inspected);
+-    ASSERT_EQ(2, inspected->waveforms.size());
+     for (auto mode : {WaveformMode::ThreeBand,WaveformMode::RGB,WaveformMode::Blue}) {
+         EXPECT_EQ(nullptr,model.waveformPreview(index,mode));
+         model.requestWaveformPreview(index,mode);
+@@ -569,9 +620,146 @@
+         EXPECT_EQ(2,preview->columns.size());
+         EXPECT_FALSE(model.getTrackId(index).isValid());
+     }
++    ASSERT_EQ(2, session->catalog()->findTrack(1)->waveforms.size());
++    session->invalidate();
++    EXPECT_EQ(nullptr, model.waveformPreview(index, WaveformMode::RGB));
+     model.clearSession();
+     EXPECT_EQ(0,model.rowCount());
+     EXPECT_EQ(nullptr,model.waveformPreview(index,WaveformMode::RGB));
++}
++
++TEST_F(RekordboxRuntimeTrackModelTest, ListReadsProgressivelyRefreshPreviewsWithoutDeckLoads) {
++    QTemporaryDir volume;
++    Rows data;
++    for (int id = 1; id <= 5; ++id) {
++        const auto owner = QStringLiteral("/Contents/%1.mp3").arg(id);
++        const auto analysis = QStringLiteral("/PIONEER/USBANLZ/%1.DAT").arg(id);
++        data.append({0, track(id, owner.toUtf8(), analysis.toUtf8())});
++        if (id != 4) {
++            ASSERT_TRUE(write(volume.path() + analysis,
++                    id == 3 ? QByteArray("corrupt analysis") : syntheticBrowserPreview(owner)));
++        }
++    }
++    ASSERT_TRUE(write(pdb(volume), database(data)));
++    auto session = std::make_shared<RekordboxUsbSession>(volume.path());
++    ASSERT_TRUE(session->load());
++    const auto catalog = session->catalog();
++    RekordboxRuntimeTrackModel model(nullptr, trackCollectionManager());
++    QList<int> refreshedRows;
++    bool firstPreviewBeforeLastInspection = false;
++    QObject::connect(&model, &QAbstractItemModel::dataChanged, &model,
++            [&](const QModelIndex& first, const QModelIndex&) {
++                EXPECT_EQ(model.thread(), QThread::currentThread());
++                refreshedRows.append(first.row());
++                if (const auto* preview = model.waveformPreview(first, WaveformMode::ThreeBand)) {
++                    if (!preview->columns.isEmpty() &&
++                            catalog->findTrack(4)->analysisState == RuntimeAnalysisState::Unknown) {
++                        firstPreviewBeforeLastInspection = true;
++                    }
++                } else {
++                    // The delegate requests a waveform when the updated row
++                    // is painted. No getTrack()/deck projection is involved.
++                    model.requestWaveformPreview(first, WaveformMode::ThreeBand);
++                }
++            });
++    model.showPlaylist(session, {2, 1, 2, 3, 4}, 12);
++    ASSERT_TRUE(waitForBrowserPreview([&] {
++        for (int row = 0; row < model.rowCount(); ++row) {
++            if (!model.waveformPreview(model.index(row, 0), WaveformMode::ThreeBand)) return false;
++        }
++        return true;
++    }));
++    EXPECT_TRUE(firstPreviewBeforeLastInspection);
++    for (int row = 0; row < model.rowCount(); ++row) {
++        const auto* preview = model.waveformPreview(model.index(row, 0), WaveformMode::ThreeBand);
++        ASSERT_NE(nullptr, preview);
++        EXPECT_EQ(row < 3 ? 2 : 0, preview->columns.size());
++        EXPECT_TRUE(refreshedRows.contains(row));
++        EXPECT_FALSE(model.getTrackId(model.index(row, 0)).isValid());
++    }
++    EXPECT_EQ(model.waveformPreview(model.index(0, 0), WaveformMode::ThreeBand),
++            model.waveformPreview(model.index(2, 0), WaveformMode::ThreeBand));
++    EXPECT_EQ(RuntimeAnalysisState::Unknown, catalog->findTrack(5)->analysisState);
++}
++
++TEST_F(RekordboxRuntimeTrackModelTest, ListSwitchDropsQueuedReadsAndStalePreviewCompletions) {
++    QTemporaryDir volume;
++    Rows data;
++    for (int id = 1; id <= 3; ++id) {
++        const auto owner = QStringLiteral("/Contents/%1.mp3").arg(id);
++        const auto analysis = QStringLiteral("/PIONEER/USBANLZ/%1.DAT").arg(id);
++        data.append({0, track(id, owner.toUtf8(), analysis.toUtf8())});
++        ASSERT_TRUE(write(volume.path() + analysis, syntheticBrowserPreview(owner)));
++    }
++    ASSERT_TRUE(write(pdb(volume), database(data)));
++    auto session = std::make_shared<RekordboxUsbSession>(volume.path());
++    ASSERT_TRUE(session->load());
++    const auto catalog = session->catalog();
++    PausedBrowserPreviewReads paused;
++    RekordboxRuntimeTrackModel model(nullptr, trackCollectionManager());
++    model.showPlaylist(session, {1, 2}, 12);
++    model.requestWaveformPreview(model.index(0, 0), WaveformMode::ThreeBand);
++    QCoreApplication::processEvents(); // Queue one read, with the worker paused.
++    EXPECT_EQ(RuntimeAnalysisState::Unknown, catalog->findTrack(1)->analysisState);
++    model.showTrackIds(session, {3, 1}, QStringLiteral("search"));
++    int changes = 0;
++    QObject::connect(&model, &QAbstractItemModel::dataChanged, &model,
++            [&](const QModelIndex& first, const QModelIndex&) {
++                if (first.row() == 0) {
++                    ++changes;
++                    EXPECT_NE(nullptr, model.waveformPreview(first, WaveformMode::Blue));
++                } else {
++                    EXPECT_EQ(1, first.row());
++                    EXPECT_EQ(nullptr, model.waveformPreview(first, WaveformMode::ThreeBand));
++                }
++            });
++    model.requestWaveformPreview(model.index(0, 0), WaveformMode::Blue);
++    paused.resume();
++    ASSERT_TRUE(waitForBrowserPreview([&] {
++        return model.waveformPreview(model.index(0, 0), WaveformMode::Blue) != nullptr;
++    }));
++    EXPECT_GE(changes, 1);
++    EXPECT_EQ(RuntimeAnalysisState::Unknown, catalog->findTrack(2)->analysisState);
++    EXPECT_EQ(nullptr, model.waveformPreview(model.index(0, 0), WaveformMode::ThreeBand));
++    // Track 1 also occurs in the new list: its old generation's decoded
++    // preview must not enter this view's cache even though its ID still fits.
++    EXPECT_EQ(nullptr, model.waveformPreview(model.index(1, 0), WaveformMode::ThreeBand));
++    const auto* preview = model.waveformPreview(model.index(0, 0), WaveformMode::Blue);
++    ASSERT_NE(nullptr, preview);
++    EXPECT_EQ(QByteArray("PWV4"), preview->tag);
++    model.clearSession();
++}
++
++TEST_F(RekordboxRuntimeTrackModelTest, InvalidationDuringBackgroundReadDoesNotPublishOrResumeTheQueue) {
++    QTemporaryDir volume;
++    ASSERT_TRUE(write(pdb(volume), database(rows())));
++    ASSERT_TRUE(write(volume.filePath("PIONEER/USBANLZ/test.DAT"),
++            syntheticBrowserPreview(QStringLiteral("/Contents/test.mp3"))));
++    auto session = std::make_shared<RekordboxUsbSession>(volume.path());
++    ASSERT_TRUE(session->load());
++    PausedBrowserPreviewReads paused;
++    RekordboxRuntimeTrackModel model(nullptr, trackCollectionManager());
++    model.showAllTracks(session);
++    model.requestWaveformPreview(model.index(0, 0), WaveformMode::ThreeBand);
++    int changes = 0;
++    QObject::connect(&model, &QAbstractItemModel::dataChanged, &model,
++            [&] { ++changes; });
++    QCoreApplication::processEvents();
++    session->invalidate();
++    paused.resume();
++    QThreadPool::globalInstance()->waitForDone();
++    QCoreApplication::processEvents();
++    EXPECT_EQ(0, changes);
++    EXPECT_EQ(nullptr, model.waveformPreview(model.index(0, 0), WaveformMode::ThreeBand));
++    EXPECT_EQ(UsbSessionState::Invalidated, session->state());
++    auto reconnected = std::make_shared<RekordboxUsbSession>(volume.path());
++    ASSERT_TRUE(reconnected->load());
++    model.showAllTracks(reconnected);
++    model.requestWaveformPreview(model.index(0, 0), WaveformMode::ThreeBand);
++    ASSERT_TRUE(waitForBrowserPreview([&] {
++        return model.waveformPreview(model.index(0, 0), WaveformMode::ThreeBand) != nullptr;
++    }));
++    EXPECT_GT(changes, 0);
+ }
+
+ TEST_F(RekordboxRuntimeTrackModelTest,

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Launch a relocatable Linux build with an isolated, English-first RX3 profile."""
 from pathlib import Path
+import hashlib
+import json
 import os
 import shutil
 import sys
@@ -8,11 +10,48 @@ import tempfile
 import xml.etree.ElementTree as ET
 
 
+def atomic_write(path: Path, data: bytes, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as file:
+            temporary = Path(file.name)
+            file.write(data)
+            os.fchmod(file.fileno(), mode)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def sync_controller_mappings(resources: Path, profile: Path) -> None:
+    manifest = resources / 'nautic-controller-files.json'
+    if not manifest.is_file():
+        return
+    for relative in json.loads(manifest.read_text()):
+        name = Path(relative)
+        if name.is_absolute() or '..' in name.parts:
+            raise ValueError(f'Invalid bundled controller path: {relative}')
+        source = resources / 'controllers' / name
+        destination = profile / 'controllers' / name
+        current = destination.read_bytes() if destination.exists() else None
+        latest = source.read_bytes()
+        if current == latest:
+            continue
+        if current is not None:
+            digest = hashlib.sha256(current).hexdigest()
+            backup = profile / 'controllers/.nautic-backups' / name.parent / f'{name.name}.{digest}.bak'
+            if not backup.exists():
+                atomic_write(backup, current)
+        atomic_write(destination, latest, source.stat().st_mode & 0o777)
+
+
 def seed_profile(resources: Path, profile: Path) -> None:
     # Only seed a new profile. Reopening the app must preserve users' choices.
     profile.mkdir(parents=True, exist_ok=True)
     config = profile / 'mixxx.cfg'
     if config.exists():
+        sync_controller_mappings(resources, profile)
         return
     for relative in ('controllers', 'effects/chains'):
         shutil.copytree(resources / relative, profile / relative, dirs_exist_ok=True)
@@ -33,13 +72,13 @@ def seed_profile(resources: Path, profile: Path) -> None:
     temporary.replace(config)
 
 
-def desktop_entry(prefix: Path) -> str:
+def desktop_entry(prefix: Path, executable: Path | None = None, icon: Path | None = None) -> str:
     # Desktop Entry escaping differs from shell quoting; escape literal % field codes.
-    executable = str(prefix / 'bin/nauticmixxx').replace('%', '%%')
+    executable = str(executable or prefix / 'bin/nauticmixxx').replace('%', '%%')
     for character in ('\\', '"', '`', '$'):
         executable = executable.replace(character, '\\' + character)
     executable = executable.replace('\\', '\\\\')
-    icon = str(prefix / 'share/icons/hicolor/1024x1024/apps/nauticmixxx.png')
+    icon = str(icon or prefix / 'share/icons/hicolor/1024x1024/apps/nauticmixxx.png')
     icon = icon.replace('\\', '\\\\').replace('\n', '\\n')
     return ('[Desktop Entry]\nType=Application\nName=NauticMixxx\n'
             'Comment=RX3-style DJ performance and Rekordbox USB browsing\n'

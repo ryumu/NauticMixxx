@@ -58,6 +58,10 @@ its menu directly below the button; the current choice is checked. Selecting
 a preset or dismissing the menu preserves the on/off state. Controller and
 screen changes update the display together.
 
+LED feedback also attaches when the controller starts before the skin finishes
+creating Smart CFX. Late attachment reads the current on/off state and preserves
+an already active effect; the first hardware press attaches immediately.
+
 Choose **ECHO + FILTER**, **REVERB + FILTER** or **FILTER** in the preset menu.
 Left/minus rotation adds a low-pass sweep (LPF); right/plus rotation adds a
 high-pass sweep (HPF). **FILTER** uses only the filter, without echo or reverb.
@@ -72,8 +76,11 @@ Smart Fader is separate and remains unimplemented.
 
 Smart CFX temporarily uses the two deck QuickEffect chains. Turning it off,
 disconnecting the controller or unloading the skin restores their previous
-effects, parameters, mix and enable states. The next ordinary CFX movement
-resumes control of the restored QuickEffect. Beat FX remains independent.
+effects, parameters, mix and enable states. While Smart CFX is off, CFX knob
+movement has no effect on the sound and does not change the restored QuickEffect.
+Turning Smart CFX on applies the latest physical knob positions, including
+movements made while it was off, without waiting for another turn of the knobs.
+The center position remains dry. Beat FX remains independent.
 The selected preset is remembered; Smart CFX starts off on connection.
 The original full-resolution filter bindings work in stock Mixxx, where the
 native Smart CFX API is unavailable.

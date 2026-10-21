@@ -14,7 +14,6 @@ def stage(prefix: Path, source: Path, project: Path) -> None:
         raise ValueError('CMake did not install Mixxx resources')
     binary = prefix / 'libexec/nauticmixxx/NauticMixxx'
     binary.parent.mkdir(parents=True, exist_ok=True)
-    (prefix / 'bin/mixxx').replace(binary)
     launcher = prefix / 'bin/nauticmixxx'
     launcher.write_text('#!/bin/sh\nset -eu\n'
                         'prefix=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\n'
@@ -22,9 +21,13 @@ def stage(prefix: Path, source: Path, project: Path) -> None:
     launcher.chmod(0o755)
     shutil.copy2(project / 'packaging/linux/launch.py', binary.parent / 'launch.py')
     shutil.copytree(project / 'skins/XDJ_RX3_Mixxx', resources / 'skins/XDJ_RX3_Mixxx', dirs_exist_ok=True)
+    controller_files = set()
     for name in ('Hercules_DJControl_Inpulse_500_RX3', 'Pioneer_DDJ_FLX4_RX3',
                  'Pioneer_DDJ_FLX6_RX3', 'Pioneer_Roland_RX3'):
-        shutil.copytree(project / 'controllers' / name, resources / 'controllers', dirs_exist_ok=True)
+        directory = project / 'controllers' / name
+        shutil.copytree(directory, resources / 'controllers', dirs_exist_ok=True)
+        controller_files.update(str(path.relative_to(directory)) for path in directory.rglob('*') if path.is_file())
+    (resources / 'nautic-controller-files.json').write_text(json.dumps(sorted(controller_files)) + '\n')
     shutil.copytree(project / 'effects/chains', resources / 'effects/chains', dirs_exist_ok=True)
     (resources / 'profiles').mkdir(exist_ok=True)
     shutil.copy2(project / 'profile/XDJ_RX3_Mixxx.profile.cfg', resources / 'profiles')
@@ -51,6 +54,9 @@ def stage(prefix: Path, source: Path, project: Path) -> None:
                                  'Pi 4 GPU, USB audio, controllers and real-time performance untested',
                                  'Denon export and local key detection disabled in Linux recipe'])
     (prefix / 'rx3-build.json').write_text(json.dumps(metadata, indent=2) + '\n')
+    # Publish only after the resources and launcher have been prepared. Replace
+    # the file atomically so an already running app can finish on its old inode.
+    (prefix / 'bin/mixxx').replace(binary)
 
 
 if __name__ == '__main__':

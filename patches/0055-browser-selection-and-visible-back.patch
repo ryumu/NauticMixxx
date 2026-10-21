@@ -1,0 +1,517 @@
+diff --git a/src/widget/wrx3browser.h b/src/widget/wrx3browser.h
+--- a/src/widget/wrx3browser.h
++++ b/src/widget/wrx3browser.h
+@@ -18,6 +18,8 @@
+ #include <QHBoxLayout>
+ #include <QTimer>
+ #include <QKeyEvent>
++#include <QMouseEvent>
++#include <QTouchEvent>
+ #include <QSqlQuery>
+ #include <QStorageInfo>
+ #include <QPainter>
+@@ -164,7 +166,16 @@
+         connect(menu,&QPushButton::released,m_menuHoldTimer,&QTimer::stop);
+         connect(m_menuHoldTimer,&QTimer::timeout,this,[this]{m_menuHeld=true;showUtility();});
+         h->addStretch(1);
+-        auto* detailRow=new QHBoxLayout;detailRow->setContentsMargins(0,0,0,0);headerLayout->addLayout(detailRow);
++        auto* detailRow=new QHBoxLayout;detailRow->setContentsMargins(0,0,0,0);detailRow->setSpacing(4);headerLayout->addLayout(detailRow);
++        m_backButton = new QPushButton("◀ BACK", header);
++        m_backButton->setObjectName("RX3BrowserBack");
++        m_backButton->setAccessibleName("Go back one level");
++        m_backButton->setToolTip("Go back one level");
++        m_backButton->setFocusPolicy(Qt::NoFocus);
++        detailRow->addWidget(m_backButton);
++        connect(m_backButton, &QPushButton::clicked, this, [this] {
++            back();updateNavigationHighlight();
++        });
+         m_sourceLabel=new QLabel(header);m_sourceLabel->setObjectName("RX3BrowserDeviceLabel");m_sourceLabel->hide();detailRow->addWidget(m_sourceLabel);
+         m_breadcrumb = new QPushButton("COLLECTION", header);m_breadcrumb->setObjectName("RX3BrowserBreadcrumb");
+         m_breadcrumb->setToolTip("Back");m_breadcrumb->setAccessibleName("Go back");detailRow->addWidget(m_breadcrumb, 1);
+@@ -220,6 +231,7 @@
+         m_sidebar->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+         m_sidebar->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+         m_sidebar->setHeaderHidden(true); m_sidebar->setAlternatingRowColors(true);
++        m_sidebar->setExpandsOnDoubleClick(false);
+         m_leftColumn=new QWidget(browse);
+         auto* columnLayout=new QHBoxLayout(m_leftColumn);
+         columnLayout->setContentsMargins(0,0,0,0);columnLayout->setSpacing(0);
+@@ -244,6 +256,11 @@
+         m_facets->installEventFilter(this);
+         QScroller::grabGesture(m_facets->viewport(),QScroller::TouchGesture);
+         QScroller::grabGesture(m_sidebar->viewport(),QScroller::TouchGesture);
++        connect(QScroller::scroller(m_sidebar->viewport()),&QScroller::stateChanged,
++                this,[this](QScroller::State state){
++                    if(state==QScroller::Dragging || state==QScroller::Scrolling)
++                        m_treeTouchIndex=QModelIndex();
++                });
+         m_loading=new QLabel("Reading USB…",browse);m_loading->setObjectName("RX3BrowserLoading");m_loading->setAlignment(Qt::AlignCenter);m_loading->hide();b->addWidget(m_loading,1);
+         m_preview=new QWidget(browse);m_preview->setObjectName("RX3PlaylistPreview");
+         auto* previewLayout=new QVBoxLayout(m_preview);
+@@ -330,13 +347,12 @@
+         connect(m_categories, &QListWidget::itemClicked, this, [this](QListWidgetItem*){ selectCategory(m_categories->currentRow());updateNavigationHighlight(); });
+         connect(m_sources,&QTreeWidget::currentItemChanged,this,[this](QTreeWidgetItem* item,QTreeWidgetItem*){updateSourceInfo(m_sources->indexOfTopLevelItem(item));});
+         connect(m_sources, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem*, int){ chooseSource(); });
+-        connect(m_sidebar, &QTreeView::clicked, this, [this](const QModelIndex&){
+-            m_focus=NavigationTarget::Tree;
+-            QTimer::singleShot(0,this,[this]{updatePlaylistPreview();updateNavigationHighlight();});
++        connect(m_sidebar, &QTreeView::clicked, this, [this](const QModelIndex& index){
++            const bool wasSelected=m_treeSelectionBeforePress==index;
++            m_treeSelectionBeforePress=QModelIndex();
++            tapTree(index,wasSelected);
+         });
+-        connect(m_sidebar, &QTreeView::doubleClicked, this, [this](const QModelIndex& index){
+-            enterTree(index);
+-        });
++        m_sidebar->viewport()->installEventFilter(this);
+         connect(m_library, &QStackedWidget::currentChanged, this, [this](int){ refreshTable(); });
+         for (QWidget* w : {static_cast<QWidget*>(m_categories), static_cast<QWidget*>(m_sidebar), static_cast<QWidget*>(m_sources)}) w->installEventFilter(this);
+         makeControl("enabled", [](double){}, true)->set(1);
+@@ -456,10 +472,12 @@
+         const double scale = qMax(0.6, height()/690.0);
+         m_categories->setFixedWidth(qRound(96*scale));
+         m_searchRail->setFixedWidth(qRound(96*scale));m_searchRail->item(0)->setSizeHint(QSize(qRound(96*scale),qRound(65*scale)));
+-        m_headerWidget->setFixedHeight(qRound(78*scale));
++        const int detailHeight=qMax(44,qRound(32*scale));
++        m_headerWidget->setFixedHeight(qRound(46*scale)+detailHeight);
+         for(auto* button:m_headerButtons) button->setFixedHeight(qRound(46*scale));
+         m_source->setFixedWidth(qRound(100*scale));
+-        m_breadcrumb->setFixedHeight(qRound(32*scale));m_sourceLabel->setFixedHeight(qRound(32*scale));
++        m_backButton->setFixedSize(qMax(92,qRound(100*scale)),detailHeight);
++        m_breadcrumb->setFixedHeight(detailHeight);m_sourceLabel->setFixedHeight(detailHeight);
+         m_search->setMaximumWidth(m_selectedCategory=="SEARCH" ? QWIDGETSIZE_MAX : qRound(400*scale));
+         m_trackInfo->setFixedWidth(qRound(280*scale));
+         m_detailedInfo->setFixedWidth(qRound(560*scale));
+@@ -471,9 +489,60 @@
+         if(event->type()==QEvent::Resize && (watched==m_pages || watched==m_leftColumn || watched==m_previewTracks))
+             QTimer::singleShot(0,this,[this]{fitBrowseRows();});
+
++        if(watched==m_sidebar->viewport() &&
++                (event->type()==QEvent::TouchBegin || event->type()==QEvent::TouchUpdate ||
++                        event->type()==QEvent::TouchEnd || event->type()==QEvent::TouchCancel)) {
++            // Accept native touches so Qt does not synthesize double-clicks
++            // that QScroller suppresses while its touch gesture is pressed.
++            const auto* touch=static_cast<QTouchEvent*>(event);
++            if(event->type()==QEvent::TouchBegin) {
++                m_treeTouchIndex=touch->points().size()==1
++                        ? m_sidebar->indexAt(touch->points().first().position().toPoint()) : QModelIndex();
++                m_treeTouchWasSelected=m_treeTouchIndex.isValid() &&
++                        m_sidebar->selectionModel()->isSelected(m_treeTouchIndex);
++                if(m_treeTouchIndex.isValid()) m_treeTouchStart=touch->points().first().position();
++            } else if(event->type()==QEvent::TouchUpdate) {
++                if(touch->points().size()!=1 ||
++                        (touch->points().first().position()-m_treeTouchStart).manhattanLength()>
++                                QApplication::startDragDistance())
++                    m_treeTouchIndex=QModelIndex();
++            } else {
++                const auto index=m_treeTouchIndex;
++                m_treeTouchIndex=QModelIndex();
++                if(event->type()==QEvent::TouchEnd && touch->points().size()==1 && index.isValid() &&
++                        m_sidebar->indexAt(touch->points().first().position().toPoint())==index &&
++                        (touch->points().first().position()-m_treeTouchStart).manhattanLength()<=
++                                QApplication::startDragDistance())
++                    tapTree(index,m_treeTouchWasSelected);
++                if(event->type()==QEvent::TouchCancel)
++                    QScroller::scroller(m_sidebar->viewport())->stop();
++            }
++            event->accept();return true;
++        }
++        if(watched==m_sidebar->viewport() && event->type()==QEvent::MouseButtonDblClick) {
++            const auto* mouse=static_cast<QMouseEvent*>(event);
++            if(mouse->button()==Qt::LeftButton) {
++                // Selection decides whether a tap opens a row, even when Qt
++                // classifies a quick second tap as a double-click press.
++                QMouseEvent press(QEvent::MouseButtonPress,mouse->position(),mouse->scenePosition(),
++                        mouse->globalPosition(),mouse->button(),mouse->buttons(),mouse->modifiers(),
++                        mouse->source(),mouse->pointingDevice());
++                press.setTimestamp(mouse->timestamp());
++                QCoreApplication::sendEvent(watched,&press);
++                return true;
++            }
++        }
++        if(watched==m_sidebar->viewport() && event->type()==QEvent::MouseButtonPress) {
++            // clicked() arrives after Qt changes the selection. Remember the
++            // selection before this press, including touch-synthesized presses.
++            const auto* mouse=static_cast<QMouseEvent*>(event);
++            m_treeSelectionBeforePress=mouse->button()==Qt::LeftButton &&
++                            m_sidebar->selectionModel()->hasSelection()
++                    ? selectedTreeIndex() : QModelIndex();
++        }
+         if(event->type() == QEvent::FocusIn || event->type() == QEvent::MouseButtonPress) {
+             if(watched==m_categories || watched==m_categories->viewport()) m_focus=NavigationTarget::Categories;
+-            else if(watched==m_sidebar) m_focus=NavigationTarget::Tree;
++            else if(watched==m_sidebar || watched==m_sidebar->viewport()) m_focus=NavigationTarget::Tree;
+             else if(watched==m_sources) m_focus=NavigationTarget::Source;
+             else if(watched==m_facets) m_focus=NavigationTarget::Facets;
+             else m_focus=NavigationTarget::TrackList;
+@@ -1085,6 +1154,13 @@
+         m_breadcrumb->setText(m_selectedCategory+" / "+value);
+         showTrackList(BrowserLevel::FacetValues);
+     }
++    void tapTree(const QModelIndex& index,bool wasSelected) {
++        if(!index.isValid() || m_level!=BrowserLevel::Hierarchy) return;
++        m_focus=NavigationTarget::Tree;m_sidebar->setFocus();
++        if(wasSelected) enterTree(index);
++        else {m_sidebar->selectIndex(index);updatePlaylistPreview();}
++        updateNavigationHighlight();
++    }
+     void enterTree(const QModelIndex& index) {
+         if(!index.isValid() || m_level!=BrowserLevel::Hierarchy) return;
+         m_sidebar->selectIndex(index);m_focus=NavigationTarget::Tree;
+@@ -1440,6 +1516,8 @@
+             refreshTable();
+             if(m_level==BrowserLevel::Hierarchy) {
+                 m_sidebar->show();m_focus=NavigationTarget::Tree;
++                const auto root=m_sidebar->rootIndex();
++                m_breadcrumb->setText(root==m_selectedDevice ? QStringLiteral("PLAYLIST") : root.data().toString());
+                 m_sidebar->setFocus();updatePlaylistPreview();return;
+             }
+             if(m_level==BrowserLevel::FacetValues) {
+@@ -1449,7 +1527,10 @@
+         if(m_level==BrowserLevel::Hierarchy && m_focus==NavigationTarget::Tree) {
+             const auto root=m_sidebar->rootIndex();
+             if(root.isValid() && root!=m_selectedDevice) {
+-                m_sidebar->setRootIndex(root.parent());m_sidebar->selectIndex(root);updatePlaylistPreview();return;
++                const auto parent=root.parent();
++                m_sidebar->setRootIndex(parent);m_sidebar->selectIndex(root);
++                m_breadcrumb->setText(parent==m_selectedDevice ? QStringLiteral("PLAYLIST") : parent.data().toString());
++                updatePlaylistPreview();return;
+             }
+             const auto parent=selectedTreeIndex().parent();
+             if(parent.isValid() && parent!=m_sidebar->rootIndex()) {
+@@ -1556,6 +1637,7 @@
+     QList<QPushButton*> m_headerButtons;
+     std::array<QPushButton*, 2> m_loadButtons{};
+     int m_sourceActionIndex=-1;
++    QPushButton* m_backButton;
+     QPushButton* m_breadcrumb;
+     QLabel* m_info;
+     QLineEdit* m_search;
+@@ -1565,6 +1647,10 @@
+     QStackedWidget* m_pages;
+     QTreeWidget* m_sources;
+     QPersistentModelIndex m_selectedDevice;
++    QPersistentModelIndex m_treeSelectionBeforePress;
++    QPersistentModelIndex m_treeTouchIndex;
++    QPointF m_treeTouchStart;
++    bool m_treeTouchWasSelected=false;
+     std::vector<QPersistentModelIndex> m_devices;
+     std::vector<std::unique_ptr<ControlObject>> m_controls;
+     NavigationTarget m_focus=NavigationTarget::Categories;
+diff --git a/src/test/rx3browserload_test.cpp b/src/test/rx3browserload_test.cpp
+--- a/src/test/rx3browserload_test.cpp
++++ b/src/test/rx3browserload_test.cpp
+@@ -2,8 +2,10 @@
+ #include <QtTest>
+ #include <QStandardItemModel>
+ #include <QScreen>
++#include <QScrollBar>
+
+ #include "control/controlpushbutton.h"
++#include "library/treeitem.h"
+ #include "test/mixxxtest.h"
+ #include "widget/wrx3browser.h"
+ #include "widget/wmainmenubar.h"
+@@ -24,6 +26,31 @@
+ };
+
+ struct Rx3BrowserLoadTestAccess {
++    static void hierarchy(WRx3Browser& browser, const QModelIndex& device) {
++        browser.m_pages->setCurrentIndex(0);
++        browser.m_selectedDevice = device;
++        browser.m_selectedCategory = "PLAYLIST";
++        browser.m_level = WRx3Browser::BrowserLevel::Hierarchy;
++        browser.m_focus = WRx3Browser::NavigationTarget::Tree;
++        browser.m_library->hide();
++        browser.m_loading->hide();
++        browser.m_emptySpace->hide();
++        browser.m_leftColumn->show();
++        browser.m_sidebar->setRootIndex(device);
++        browser.m_sidebar->show();
++        browser.m_breadcrumb->setText("PLAYLIST");
++        browser.setPreview("TRACK", {});
++        browser.updateNavigationHighlight();
++    }
++    static bool inHierarchy(const WRx3Browser& browser) {
++        return browser.m_level == WRx3Browser::BrowserLevel::Hierarchy;
++    }
++    static void searchPresentation(WRx3Browser& browser) {
++        browser.m_selectedCategory = "SEARCH";
++        browser.m_breadcrumb->hide();
++        browser.m_search->show();
++        browser.m_keyboard->show();
++    }
+     static void tracks(WRx3Browser& browser) {
+         browser.m_pages->setCurrentIndex(0);
+         browser.m_level = WRx3Browser::BrowserLevel::Tracks;
+@@ -34,6 +61,30 @@
+         browser.refreshTable();
+     }
+     static void refresh(WRx3Browser& browser) { browser.updateLoadButtons(); }
++};
++
++class BrowserPlaylistFeature : public LibraryFeature {
++  public:
++    explicit BrowserPlaylistFeature(UserSettingsPointer config)
++            : LibraryFeature(nullptr, config, "rekordbox") {
++        auto root = TreeItem::newRoot(this);
++        auto* folder = root->appendChild("Folder");
++        auto* nested = folder->appendChild("Nested folder");
++        nested->appendChild("Playlist");
++        for (int row = 0; row < 30; ++row)
++            root->appendChild(QStringLiteral("Playlist %1").arg(row));
++        tree.setRootItem(std::move(root));
++    }
++    QVariant title() override { return "USB1"; }
++    TreeItemModel* sidebarModel() const override { return const_cast<TreeItemModel*>(&tree); }
++    void activate() override {}
++    void activateChild(const QModelIndex& index) override {
++        ++activations;
++        lastActivated = index.data().toString();
++    }
++    TreeItemModel tree;
++    int activations = 0;
++    QString lastActivated;
+ };
+
+ class Rx3BrowserLoadTest : public MixxxTest {
+@@ -67,6 +118,7 @@
+
+     void TearDown() override {
+         browser.reset();
++        playlists.reset();
+         PlayerInfo::destroy();
+     }
+
+@@ -78,6 +130,36 @@
+         table->selectRow(1);
+         QCoreApplication::processEvents();
+         Rx3BrowserLoadTestAccess::refresh(*browser);
++    }
++    void preparePlaylists() {
++        playlists = std::make_unique<BrowserPlaylistFeature>(config());
++        devices.addLibraryFeature(playlists.get());
++        Rx3BrowserLoadTestAccess::hierarchy(*browser, devices.index(0, 0));
++        QCoreApplication::processEvents();
++        // Offscreen fixtures center their taps at the same screen position.
++        // Let the previous test's native double-click interval expire, while
++        // keeping consecutive taps inside this test fast.
++        QTest::qWait(QApplication::doubleClickInterval() + 1);
++    }
++    WLibrarySidebar* sidebar() const {
++        return browser->findChild<WLibrarySidebar*>("RX3BrowserFolders");
++    }
++    void touchTap(QWidget* target, const QPoint& point) {
++        const QRect screen = target->screen()->geometry();
++        // Fit wide test windows horizontally, but preserve row Y coordinates:
++        // centering every tap would turn taps on different rows into a double-click.
++        browser->QWidget::move(QPoint(browser->pos().x() + screen.center().x() -
++                        target->mapToGlobal(point).x(), screen.top()));
++        browser->activateWindow();
++        QCoreApplication::processEvents();
++        ASSERT_TRUE(QTest::qWaitForWindowActive(browser.get()));
++        ASSERT_TRUE(target->isVisible());
++        ASSERT_TRUE(target->rect().contains(point));
++        ASSERT_TRUE(screen.contains(target->mapToGlobal(point)));
++        static auto* device = QTest::createTouchDevice(QInputDevice::DeviceType::TouchScreen);
++        QTest::touchEvent(target, device).press(0, point, target);
++        QTest::touchEvent(target, device).release(0, point, target);
++        QTest::qWait(100);
+     }
+
+     QStandardItemModel rows;
+@@ -85,10 +167,194 @@
+     WLibrary* library = nullptr;
+     BrowserLoadTable* table = nullptr;
+     std::unique_ptr<WRx3Browser> browser;
++    std::unique_ptr<BrowserPlaylistFeature> playlists;
+     std::unique_ptr<ControlObject> tab, maximized;
+     std::array<std::unique_ptr<ControlPushButton>, 2> play, load;
+     std::array<std::unique_ptr<ControlObject>, 2> lost;
+ };
++
++TEST_F(Rx3BrowserLoadTest, TouchSelectsThenRepeatTapOpensWithoutRequiringDoubleTapTiming) {
++    preparePlaylists();
++    const QModelIndex usb = devices.index(0, 0);
++    const QModelIndex folder = devices.index(0, 0, usb);
++    const QModelIndex nested = devices.index(0, 0, folder);
++    const QModelIndex playlist = devices.index(0, 0, nested);
++    QSignalSpy loads1(load[0].get(), &ControlObject::valueChanged);
++    QSignalSpy loads2(load[1].get(), &ControlObject::valueChanged);
++    touchTap(sidebar()->viewport(), sidebar()->visualRect(folder).center());
++    ASSERT_EQ(usb, sidebar()->rootIndex());
++    ASSERT_TRUE(sidebar()->selectionModel()->isSelected(folder));
++    ASSERT_FALSE(library->isVisible());
++    EXPECT_EQ(0, playlists->activations);
++    QTest::qWait(QApplication::doubleClickInterval() + 50);
++    for (const auto& index : {folder, nested, playlist}) {
++        // Opening a folder preselects its first child. A tap on that existing
++        // selection opens it, including when the selection was restored by BACK.
++        touchTap(sidebar()->viewport(), sidebar()->visualRect(index).center());
++        if (index != playlist) {
++            EXPECT_EQ(index, sidebar()->rootIndex());
++            EXPECT_TRUE(Rx3BrowserLoadTestAccess::inHierarchy(*browser));
++        }
++    }
++    EXPECT_TRUE(library->isVisible());
++    EXPECT_FALSE(Rx3BrowserLoadTestAccess::inHierarchy(*browser));
++    EXPECT_EQ(1, playlists->activations);
++    EXPECT_EQ("Playlist", playlists->lastActivated);
++    table->clearSelection();
++    touchTap(table->viewport(), table->visualRect(rows.index(1, 0)).center());
++    EXPECT_TRUE(table->selectionModel()->isRowSelected(1, QModelIndex()));
++    EXPECT_TRUE(button("RX3BrowserLoad1")->isEnabled());
++    EXPECT_EQ(0, loads1.count());
++    EXPECT_EQ(0, loads2.count());
++}
++
++TEST_F(Rx3BrowserLoadTest, MouseSelectsThenOpensAndTouchBackRestoresEachParentAndSelection) {
++    preparePlaylists();
++    const QModelIndex usb = devices.index(0, 0);
++    const QModelIndex folder = devices.index(0, 0, usb);
++    const QModelIndex nested = devices.index(0, 0, folder);
++    const QModelIndex playlist = devices.index(0, 0, nested);
++    for (const auto& index : {folder, nested, playlist}) {
++        if (!sidebar()->selectionModel()->isSelected(index)) {
++            const auto previousRoot = sidebar()->rootIndex();
++            QTest::mouseClick(sidebar()->viewport(), Qt::LeftButton, Qt::NoModifier,
++                    sidebar()->visualRect(index).center());
++            QCoreApplication::processEvents();
++            ASSERT_EQ(previousRoot, sidebar()->rootIndex());
++            ASSERT_TRUE(sidebar()->selectionModel()->isSelected(index));
++        }
++        QTest::mouseClick(sidebar()->viewport(), Qt::LeftButton, Qt::NoModifier,
++                sidebar()->visualRect(index).center());
++        QCoreApplication::processEvents();
++    }
++    ASSERT_TRUE(library->isVisible());
++    auto* back = button("RX3BrowserBack");
++    ASSERT_TRUE(back);
++    auto* title = button("RX3BrowserBreadcrumb");
++    for (const auto& selected : {playlist, nested, folder}) {
++        touchTap(back, back->rect().center());
++        EXPECT_TRUE(Rx3BrowserLoadTestAccess::inHierarchy(*browser));
++        EXPECT_FALSE(library->isVisible());
++        EXPECT_EQ(selected.parent(), sidebar()->rootIndex());
++        EXPECT_TRUE(sidebar()->selectionModel()->isSelected(selected));
++        EXPECT_EQ(selected.parent() == usb ? QStringLiteral("PLAYLIST")
++                                         : selected.parent().data().toString(), title->text());
++    }
++    EXPECT_EQ(1, playlists->activations);
++    touchTap(sidebar()->viewport(), sidebar()->visualRect(folder).center());
++    EXPECT_EQ(folder, sidebar()->rootIndex());
++}
++
++TEST_F(Rx3BrowserLoadTest, ChangingSelectedPlaylistDoesNotOpenItAndFastRepeatOpensOnce) {
++    preparePlaylists();
++    const QModelIndex usb = devices.index(0, 0);
++    const QModelIndex firstPlaylist = devices.index(1, 0, usb);
++    const QModelIndex secondPlaylist = devices.index(2, 0, usb);
++    sidebar()->selectIndex(firstPlaylist);
++    touchTap(sidebar()->viewport(), sidebar()->visualRect(secondPlaylist).center());
++    ASSERT_EQ(usb, sidebar()->rootIndex());
++    ASSERT_TRUE(sidebar()->selectionModel()->isSelected(secondPlaylist));
++    ASSERT_FALSE(library->isVisible());
++    EXPECT_EQ(0, playlists->activations);
++    touchTap(sidebar()->viewport(), sidebar()->visualRect(firstPlaylist).center());
++    ASSERT_TRUE(sidebar()->selectionModel()->isSelected(firstPlaylist));
++    ASSERT_FALSE(library->isVisible());
++    EXPECT_EQ(0, playlists->activations);
++    touchTap(sidebar()->viewport(), sidebar()->visualRect(firstPlaylist).center());
++    EXPECT_TRUE(library->isVisible());
++    EXPECT_EQ(1, playlists->activations);
++    EXPECT_EQ("Playlist 0", playlists->lastActivated);
++}
++
++TEST_F(Rx3BrowserLoadTest, DoubleClickPressOnDifferentRowSelectsItBeforeOpening) {
++    preparePlaylists();
++    const QModelIndex usb = devices.index(0, 0);
++    const QModelIndex firstPlaylist = devices.index(1, 0, usb);
++    const QModelIndex secondPlaylist = devices.index(2, 0, usb);
++    sidebar()->selectIndex(firstPlaylist);
++    // Qt can classify two taps around a row boundary as a double-click.
++    // The tapped row must still become the selection without opening.
++    const QPoint point = sidebar()->visualRect(secondPlaylist).center();
++    QTest::mouseDClick(sidebar()->viewport(), Qt::LeftButton, Qt::NoModifier, point);
++    QTest::mouseRelease(sidebar()->viewport(), Qt::LeftButton, Qt::NoModifier, point);
++    EXPECT_EQ(usb, sidebar()->rootIndex());
++    ASSERT_TRUE(sidebar()->selectionModel()->isSelected(secondPlaylist));
++    EXPECT_FALSE(library->isVisible());
++    EXPECT_EQ(0, playlists->activations);
++    QTest::mouseClick(sidebar()->viewport(), Qt::LeftButton, Qt::NoModifier, point);
++    EXPECT_TRUE(library->isVisible());
++    EXPECT_EQ(1, playlists->activations);
++    EXPECT_EQ("Playlist 1", playlists->lastActivated);
++}
++
++TEST_F(Rx3BrowserLoadTest, TouchPressOutsideReleaseAndCancelDoNotOpenSelectedPlaylist) {
++    preparePlaylists();
++    const QModelIndex usb = devices.index(0, 0);
++    const QModelIndex playlist = devices.index(1, 0, usb);
++    sidebar()->selectIndex(playlist);
++    auto* viewport = sidebar()->viewport();
++    const QPoint point = sidebar()->visualRect(playlist).center();
++    const QPoint outside = sidebar()->visualRect(devices.index(2, 0, usb)).center();
++    const QRect screen = viewport->screen()->geometry();
++    browser->QWidget::move(QPoint(browser->pos().x() + screen.center().x() -
++                    viewport->mapToGlobal(point).x(), screen.top()));
++    QCoreApplication::processEvents();
++    ASSERT_TRUE(screen.contains(viewport->mapToGlobal(point)));
++    ASSERT_TRUE(screen.contains(viewport->mapToGlobal(outside)));
++    auto* device = QTest::createTouchDevice(QInputDevice::DeviceType::TouchScreen);
++    QTest::touchEvent(viewport, device).press(0, point, viewport);
++    EXPECT_FALSE(library->isVisible());
++    QTest::touchEvent(viewport, device).release(0, outside, viewport);
++    EXPECT_FALSE(library->isVisible());
++    QTest::touchEvent(viewport, device).press(0, point, viewport);
++    QTouchEvent cancel(QEvent::TouchCancel, device);
++    QCoreApplication::sendEvent(viewport, &cancel);
++    QTest::touchEvent(viewport, device).release(0, point, viewport);
++    EXPECT_FALSE(library->isVisible());
++    EXPECT_EQ(usb, sidebar()->rootIndex());
++    EXPECT_TRUE(sidebar()->selectionModel()->isSelected(playlist));
++    EXPECT_EQ(0, playlists->activations);
++}
++
++TEST_F(Rx3BrowserLoadTest, BackButtonRemainsVisibleInSearchAndFitsTouchAtPanelSizes) {
++    auto* back = button("RX3BrowserBack");
++    ASSERT_TRUE(back);
++    for (const auto size : {QSize(800, 480), QSize(1280, 690), QSize(1920, 1090)}) {
++        browser->resize(size);
++        Rx3BrowserLoadTestAccess::searchPresentation(*browser);
++        QCoreApplication::processEvents();
++        EXPECT_FALSE(button("RX3BrowserBreadcrumb")->isVisible());
++        EXPECT_TRUE(back->isVisible());
++        EXPECT_GE(back->height(), 44);
++        EXPECT_GE(back->width(), 92);
++        EXPECT_TRUE(browser->rect().contains(QRect(back->mapTo(browser.get(), QPoint()), back->size())));
++    }
++}
++
++TEST_F(Rx3BrowserLoadTest, ScrollingPlaylistListDoesNotOpenRows) {
++    preparePlaylists();
++    const QModelIndex usb = devices.index(0, 0);
++    auto* viewport = sidebar()->viewport();
++    const QPoint start = sidebar()->visualRect(devices.index(8, 0, usb)).center();
++    sidebar()->selectIndex(devices.index(8, 0, usb));
++    const QPoint finish = start - QPoint(0, 150);
++    const QRect screen = viewport->screen()->geometry();
++    browser->QWidget::move(browser->pos() + screen.center() - viewport->mapToGlobal(start));
++    QCoreApplication::processEvents();
++    ASSERT_TRUE(viewport->rect().contains(start));
++    ASSERT_TRUE(viewport->rect().contains(finish));
++    auto* device = QTest::createTouchDevice(QInputDevice::DeviceType::TouchScreen);
++    QTest::touchEvent(viewport, device).press(0, start, viewport);
++    QTest::qWait(30);
++    QTest::touchEvent(viewport, device).move(0, finish, viewport);
++    QTest::qWait(100);
++    QTest::touchEvent(viewport, device).release(0, finish, viewport);
++    QTest::qWait(200);
++    EXPECT_GT(sidebar()->verticalScrollBar()->value(), 0);
++    EXPECT_EQ(usb, sidebar()->rootIndex());
++    EXPECT_TRUE(Rx3BrowserLoadTestAccess::inHierarchy(*browser));
++    EXPECT_EQ(0, playlists->activations);
++}
+
+ TEST_F(Rx3BrowserLoadTest, NoSelectionDisablesLoadsAndPerformanceDoesNotChangeTransport) {
+     auto* load1 = button("RX3BrowserLoad1");
