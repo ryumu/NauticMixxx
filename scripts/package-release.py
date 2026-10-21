@@ -143,8 +143,8 @@ def validate_inputs(app: Path) -> None:
     if skin_version != VERSION:
         raise ValueError(f"La skin declara {skin_version}; se esperaba {VERSION}")
     patches = sorted((ROOT / "patches").glob("00[0-9][0-9]-*.patch"))
-    if len(patches) != 57:
-        raise ValueError("La release requiere exactamente los cincuenta y siete parches 0001–0057")
+    if len(patches) != 58:
+        raise ValueError("La release requiere exactamente los cincuenta y ocho parches 0001–0058")
     if not (SOURCE_ROOT / "src/widget/rx3displaystate.h").is_file():
         raise ValueError("Faltan los fuentes correspondientes parcheados de Mixxx")
     if not app.is_dir() or not (app / "Contents/Info.plist").is_file():

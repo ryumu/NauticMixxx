@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Batch background USB analysis validation, yield to explicit track loads, and cancel between tracks on list changes. Reuse inspected metadata without rereading the PDB while retaining full validation for explicit loads and waveform payloads.
+
 - Reset ECHO delay history in constant time when disabling the effect, preserving silent restarts and delay/feedback behavior without clearing several MiB in the audio callback.
 
 - Restore DDJ-FLX4 Smart CFX LED feedback when the controller initializes before the native skin controls; attach feedback when they become available without resetting an active effect.

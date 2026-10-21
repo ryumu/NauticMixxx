@@ -1,5 +1,15 @@
 # NauticMixxx native patches
 
+## 0058 — Bounded USB analysis prefetch
+
+- Verify PDB identity around batches of up to 16 tracks, with an eight-millisecond
+  analysis-work budget checked between tracks. Publish the first row separately.
+- Prioritize visible previews and explicit analysis requests, cancel between
+  tracks when lists change, and yield between background jobs. Cached metadata
+  starts no new reads; explicit loads and waveform payloads retain full checks.
+- Cover batch limits, cancellation, cue ownership, cache reuse and same-size,
+  same-mtime PDB tampering together with the existing progressive preview tests.
+
 ## 0057 — Constant-time ECHO history reset
 
 - Treat delay history preceding the last reset as silence until overwritten.

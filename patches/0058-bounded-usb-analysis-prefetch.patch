@@ -1,0 +1,267 @@
+diff --git a/src/library/rekordbox/rekordboxruntimetrackmodel.cpp b/src/library/rekordbox/rekordboxruntimetrackmodel.cpp
+--- a/src/library/rekordbox/rekordboxruntimetrackmodel.cpp
++++ b/src/library/rekordbox/rekordboxruntimetrackmodel.cpp
+@@ -153,6 +153,8 @@
+         QString viewKey) {
+     beginResetModel();
+     ++m_previewGeneration;
++    if (m_analysisCancelled) m_analysisCancelled->store(true);
++    m_analysisPrefetchStarted = false;
+     m_waveformPreviewCache.clear();
+     m_pendingWaveformPreviews.clear();
+     m_previewRequests.clear();
+@@ -162,7 +164,8 @@
+     m_rows = std::move(rows);
+     for (int row = 0; row < m_rows.size(); ++row) {
+         const auto id = m_rows[row].rekordboxId;
+-        if (!m_rowsByTrackId.contains(id)) m_analysisRequests.enqueue(id);
++        if (!m_rowsByTrackId.contains(id) && m_rows[row].analysisState == RuntimeAnalysisState::Unknown)
++            m_analysisRequests.enqueue(id);
+         m_rowsByTrackId[id].append(row);
+     }
+     const auto state = m_session ? m_session->sessionState() : nullptr;
+@@ -333,7 +336,46 @@
+ void RekordboxRuntimeTrackModel::schedulePreviewRead() {
+     // Defer until the list is published and painting has queued visible rows.
+     // No USB file reads or analysis inspection run on the GUI/audio thread.
+-    QTimer::singleShot(0, this, [this] { startNextPreviewRead(); });
++    QTimer::singleShot(m_previewRequests.isEmpty() ? 5 : 0, this, [this] { startNextPreviewRead(); });
++}
++
++void RekordboxRuntimeTrackModel::startNextAnalysisRead() {
++    QList<quint32> ids;
++    const auto catalog = m_session->catalog();
++    // Publish the first row promptly so painting can prioritize its preview.
++    const int batchSize = m_analysisPrefetchStarted ? RekordboxUsbSession::kAnalysisPrefetchBatchSize : 1;
++    while (!m_analysisRequests.isEmpty() && ids.size() < batchSize) {
++        const auto id = m_analysisRequests.dequeue();
++        const auto track = catalog ? catalog->findTrack(id) : std::nullopt;
++        if (track && track->analysisState == RuntimeAnalysisState::Unknown) ids.append(id);
++    }
++    if (ids.isEmpty()) return;
++    m_analysisPrefetchStarted = true;
++    const auto cancelled = std::make_shared<std::atomic<bool>>(false);
++    m_analysisCancelled = cancelled;
++    const auto session = m_session;
++    const auto generation = m_previewGeneration;
++    m_previewReadRunning = true;
++    auto* watcher = new QFutureWatcher<int>(this);
++    connect(watcher, &QFutureWatcher<int>::finished, this, [this, watcher, ids, generation] {
++        const int completed = watcher->result();
++        watcher->deleteLater();
++        m_previewReadRunning = false;
++        const auto state = sessionState();
++        if (generation == m_previewGeneration && state && state->isActive()) {
++            for (int i = ids.size() - 1; i >= completed; --i) m_analysisRequests.prepend(ids[i]);
++            const int column = fieldIndex(ColumnCache::COLUMN_LIBRARYTABLE_PREVIEW);
++            for (int i = 0; i < completed && generation == m_previewGeneration; ++i) {
++                const auto rows = m_rowsByTrackId.value(ids[i]);
++                for (const auto row : rows) {
++                    if (generation != m_previewGeneration) break;
++                    if (column >= 0) emit dataChanged(index(row, column), index(row, column));
++                }
++            }
++        }
++        schedulePreviewRead();
++    });
++    watcher->setFuture(QtConcurrent::run([session, ids, cancelled] { return session->prefetchTrackAnalyses(ids, cancelled); }));
+ }
+ 
+ void RekordboxRuntimeTrackModel::startNextPreviewRead() {
+@@ -347,6 +389,10 @@
+     }
+     const bool decodePreview = !m_previewRequests.isEmpty();
+     if (!decodePreview && m_analysisRequests.isEmpty()) return;
++    if (!decodePreview) {
++        startNextAnalysisRead();
++        return;
++    }
+     const auto request = decodePreview
+             ? m_previewRequests.dequeue()
+             : qMakePair(m_analysisRequests.dequeue(), WaveformMode::ThreeBand);
+diff --git a/src/library/rekordbox/rekordboxruntimetrackmodel.h b/src/library/rekordbox/rekordboxruntimetrackmodel.h
+--- a/src/library/rekordbox/rekordboxruntimetrackmodel.h
++++ b/src/library/rekordbox/rekordboxruntimetrackmodel.h
+@@ -7,6 +7,7 @@
+ #include <QSet>
+ 
+ #include <memory>
++#include <atomic>
+ 
+ #include "library/basetracktablemodel.h"
+ #include "library/rekordbox/rekordboxruntimecatalog.h"
+@@ -79,6 +80,7 @@
+             QString viewKey);
+     const RuntimeTrack* trackAt(const QModelIndex& index) const;
+     void startNextPreviewRead();
++    void startNextAnalysisRead();
+     void schedulePreviewRead();
+ 
+     std::shared_ptr<RekordboxUsbSession> m_session;
+@@ -95,6 +97,8 @@
+     // Keep one read in flight even across model resets. A stale completion
+     // releases the worker before starting work for the new list.
+     bool m_previewReadRunning{false};
++    bool m_analysisPrefetchStarted{false};
++    std::shared_ptr<std::atomic<bool>> m_analysisCancelled;
+     quint64 m_previewGeneration{0};
+ };
+ 
+diff --git a/src/library/rekordbox/rekordboxusbsession.cpp b/src/library/rekordbox/rekordboxusbsession.cpp
+--- a/src/library/rekordbox/rekordboxusbsession.cpp
++++ b/src/library/rekordbox/rekordboxusbsession.cpp
+@@ -5,6 +5,7 @@
+ #include <QFileInfo>
+ #include <QFile>
+ #include <QDateTime>
++#include <QElapsedTimer>
+ #include <QUuid>
+ #include <QSet>
+ #include <algorithm>
+@@ -417,6 +418,11 @@
+ 
+ std::optional<RuntimeTrack> RekordboxUsbSession::loadTrackAnalysis(
+         quint32 rekordboxId, QString* error) {
++    struct PendingRequest {
++        std::atomic<int>& count;
++        explicit PendingRequest(std::atomic<int>& value) : count(value) { ++count; }
++        ~PendingRequest() { --count; }
++    } pending(m_foregroundAnalysisRequests);
+     if (error) error->clear();
+     const auto fail = [error](const QString& message) -> std::optional<RuntimeTrack> {
+         if (error) *error = message;
+@@ -446,6 +452,49 @@
+         return fail(QStringLiteral("USB session invalidated during analysis inspection"));
+     // Take fresh PDB metadata too: a rating write may have completed during I/O.
+     return catalog->findTrack(rekordboxId);
++}
++
++int RekordboxUsbSession::prefetchTrackAnalyses(const QList<quint32>& ids,
++        std::shared_ptr<const std::atomic<bool>> cancelled) {
++    const std::unique_lock<std::mutex> analysisLock(m_analysisMutex, std::try_to_lock);
++    if (!analysisLock.owns_lock() || m_foregroundAnalysisRequests.load() > 0) return 0;
++    std::shared_ptr<RuntimeCatalog> catalog;
++    QString root;
++    {
++        const std::lock_guard<std::mutex> lock(m_mutex);
++        if (m_state != UsbSessionState::Ready || !m_catalog || !m_sessionState->isActive()) return 0;
++        catalog = m_catalog;
++        root = m_root;
++    }
++    QList<RuntimeTrack> inspected;
++    QElapsedTimer workTime;
++    workTime.start();
++    int completed = 0;
++    for (const auto id : ids) {
++        if (completed >= kAnalysisPrefetchBatchSize || m_foregroundAnalysisRequests.load() > 0 ||
++                !m_sessionState->isActive() || (cancelled && cancelled->load()) ||
++                (!inspected.isEmpty() && workTime.elapsed() >= 8)) break;
++        auto track = catalog->findTrack(id);
++        if (track && track->analysisState == RuntimeAnalysisState::Unknown) {
++            // Verify the whole batch before reading its first ANLZ and again
++            // before publishing. Cached metadata alone initiates no USB I/O.
++            if (inspected.isEmpty()) {
++                if (!refresh()) return 0;
++                workTime.restart();
++            }
++            applyAnlz(root, m_sessionId, &*track);
++            inspected.append(std::move(*track));
++        }
++        ++completed;
++    }
++    if (inspected.isEmpty()) return completed;
++    if (!refresh()) return 0;
++    const std::lock_guard<std::mutex> lock(m_mutex);
++    if (m_state != UsbSessionState::Ready || m_catalog != catalog || !m_sessionState->isActive()) return 0;
++    for (const auto& track : inspected) {
++        if (!catalog->publishAnalysis(track)) return 0;
++    }
++    return completed;
+ }
+ 
+ bool RekordboxUsbSession::refresh() {
+diff --git a/src/library/rekordbox/rekordboxusbsession.h b/src/library/rekordbox/rekordboxusbsession.h
+--- a/src/library/rekordbox/rekordboxusbsession.h
++++ b/src/library/rekordbox/rekordboxusbsession.h
+@@ -2,6 +2,7 @@
+ 
+ #include <memory>
+ #include <mutex>
++#include <atomic>
+ 
+ #include "library/rekordbox/rekordboxdevice.h"
+ #include "library/rekordbox/rekordboxruntimecatalog.h"
+@@ -38,6 +39,11 @@
+     // tracks. Potentially expensive synchronous I/O, never on the audio thread.
+     std::optional<RuntimeTrack> loadTrackAnalysis(
+             quint32 rekordboxId, QString* error = nullptr);
++    // Bounded background work. Returns the completed prefix; callers retry the
++    // remainder after yielding. Explicit loads retain full per-request checks.
++    static constexpr int kAnalysisPrefetchBatchSize = 16;
++    int prefetchTrackAnalyses(const QList<quint32>& ids,
++            std::shared_ptr<const std::atomic<bool>> cancelled = {});
+     // Explicit USB write, off GUI/audio threads; returns an error or empty.
+     QString writeList(const QString& name, const QList<quint32>& ids, bool history = false);
+     QString writePerformance(const PerformanceEdit& edit);
+@@ -68,6 +74,7 @@
+     // Serializes lazy publication with performance writes. File I/O does not
+     // hold m_mutex, so invalidation can still revoke an in-flight inspection.
+     std::mutex m_analysisMutex;
++    std::atomic<int> m_foregroundAnalysisRequests{0};
+     mutable std::mutex m_mutex;
+     QString m_root;
+     const std::shared_ptr<SessionState> m_sessionState;
+diff --git a/src/test/rekordboxusbsession_test.cpp b/src/test/rekordboxusbsession_test.cpp
+--- a/src/test/rekordboxusbsession_test.cpp
++++ b/src/test/rekordboxusbsession_test.cpp
+@@ -2171,3 +2171,50 @@
+     quint32 id=0;EXPECT_FALSE(writeUsbList(&wrong,"Must not be written",{1},false,&id).isEmpty());
+     EXPECT_EQ(original,readDatabaseFile(pdb(volume),DatabaseKind::Main).bytes);
+ }
++
++TEST(RekordboxUsbSessionTest, BoundedBackgroundBatchesCancelAndKeepExplicitFingerprintChecks) {
++    QTemporaryDir volume;
++    Rows data;
++    QList<quint32> ids;
++    for (quint32 id = 1; id <= 40; ++id) {
++        const auto owner = QString("/Contents/%1.mp3").arg(id);
++        const auto analysis = QString("/PIONEER/USBANLZ/%1.DAT").arg(id);
++        data.append({0, track(id, owner.toUtf8(), analysis.toUtf8())});
++        ASSERT_TRUE(write(volume.path() + analysis, syntheticCueAnlz(owner)));
++        ids.append(id);
++    }
++    ASSERT_TRUE(write(pdb(volume), database(data)));
++    RekordboxUsbSession session(volume.path());
++    ASSERT_TRUE(session.load());
++    const auto catalog = session.catalog();
++    const auto cancelled = std::make_shared<std::atomic<bool>>(true);
++    EXPECT_EQ(0, session.prefetchTrackAnalyses(ids, cancelled));
++    EXPECT_EQ(RuntimeAnalysisState::Unknown, catalog->findTrack(1)->analysisState);
++    int completed = 0;
++    while (completed < ids.size()) {
++        const int count = session.prefetchTrackAnalyses(ids.mid(completed));
++        ASSERT_GT(count, 0);
++        ASSERT_LE(count, RekordboxUsbSession::kAnalysisPrefetchBatchSize);
++        completed += count;
++        for (int i = 0; i < completed; ++i) {
++            ASSERT_EQ(RuntimeAnalysisState::Ready, catalog->findTrack(ids[i])->analysisState);
++            ASSERT_EQ(4, catalog->findTrack(ids[i])->cues.size());
++        }
++        if (completed < ids.size()) EXPECT_EQ(RuntimeAnalysisState::Unknown, catalog->findTrack(ids[completed])->analysisState);
++    }
++    // Reusing metadata does not weaken explicit-load source validation, even
++    // if a PDB edit preserves both its byte length and modification timestamp.
++    QFile changed(pdb(volume));
++    ASSERT_TRUE(changed.open(QIODevice::ReadWrite));
++    const auto modified = QFileInfo(changed).lastModified();
++    ASSERT_TRUE(changed.seek(changed.size() - 1));
++    ASSERT_EQ(1, changed.write("x", 1));
++    ASSERT_TRUE(changed.flush());
++    ASSERT_TRUE(changed.setFileTime(modified, QFileDevice::FileModificationTime));
++    changed.close();
++    QString error;
++    EXPECT_FALSE(session.loadTrackAnalysis(1, &error));
++    EXPECT_FALSE(error.isEmpty());
++    EXPECT_EQ(UsbSessionState::Invalidated, session.state());
++    EXPECT_EQ(0, session.prefetchTrackAnalyses(ids));
++}
