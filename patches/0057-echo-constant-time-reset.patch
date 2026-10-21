@@ -1,0 +1,138 @@
+diff --git a/src/effects/backends/builtin/echoeffect.cpp b/src/effects/backends/builtin/echoeffect.cpp
+--- a/src/effects/backends/builtin/echoeffect.cpp
++++ b/src/effects/backends/builtin/echoeffect.cpp
+@@ -156,6 +156,11 @@
+             pGroupState->delay_buf.size());
+     int read_position = pGroupState->write_position;
+     decrementRing(&read_position, delay_samples, pGroupState->delay_buf.size());
++    // A zero-distance head aliases the oldest ring entry, just like a full
++    // ring delay. Neither head may read history preceding the last reset.
++    const int history_samples = delay_samples ? delay_samples : pGroupState->delay_buf.size();
++    const int prev_history_samples = pGroupState->prev_delay_samples
++            ? pGroupState->prev_delay_samples : pGroupState->delay_buf.size();
+ 
+     RampingValue<CSAMPLE_GAIN> send(pGroupState->prev_send,
+             send_current,
+@@ -175,15 +180,21 @@
+         CSAMPLE_GAIN feedback_ramped = feedback.getNth(rampIndex);
+         ++rampIndex;
+ 
+-        CSAMPLE bufferedSampleLeft = pGroupState->delay_buf[read_position];
+-        CSAMPLE bufferedSampleRight = pGroupState->delay_buf[read_position + 1];
++        CSAMPLE bufferedSampleLeft = 0;
++        CSAMPLE bufferedSampleRight = 0;
++        if (history_samples <= pGroupState->valid_samples) {
++            bufferedSampleLeft = pGroupState->delay_buf[read_position];
++            bufferedSampleRight = pGroupState->delay_buf[read_position + 1];
++        }
+         if (read_position != prev_read_position) {
+             const CSAMPLE_GAIN frac = static_cast<CSAMPLE_GAIN>(i) /
+                     engineParameters.samplesPerBuffer();
+             bufferedSampleLeft *= frac;
+             bufferedSampleRight *= frac;
+-            bufferedSampleLeft += pGroupState->delay_buf[prev_read_position] * (1 - frac);
+-            bufferedSampleRight += pGroupState->delay_buf[prev_read_position + 1] * (1 - frac);
++            if (prev_history_samples <= pGroupState->valid_samples) {
++                bufferedSampleLeft += pGroupState->delay_buf[prev_read_position] * (1 - frac);
++                bufferedSampleRight += pGroupState->delay_buf[prev_read_position + 1] * (1 - frac);
++            }
+         }
+         // Both read heads must advance every frame, including when the delay
+         // is unchanged. Otherwise the old head falls one frame behind and
+@@ -226,6 +237,9 @@
+         incrementRing(&pGroupState->write_position,
+                 engineParameters.channelCount(),
+                 pGroupState->delay_buf.size());
++        if (pGroupState->valid_samples < pGroupState->delay_buf.size()) {
++            pGroupState->valid_samples += engineParameters.channelCount();
++        }
+ 
+         ++(pGroupState->ping_pong);
+         if (pGroupState->ping_pong >= delay_samples) {
+@@ -238,7 +252,7 @@
+     // of being handled by EngineEffect::process).
+     if (enableState == EffectEnableState::Disabling) {
+         SampleUtil::applyRampingGain(pOutput, 1.0, 0.0, engineParameters.samplesPerBuffer());
+-        pGroupState->delay_buf.clear();
++        pGroupState->valid_samples = 0;
+         pGroupState->prev_send = 0;
+     } else {
+         pGroupState->prev_send = send_current;
+diff --git a/src/effects/backends/builtin/echoeffect.h b/src/effects/backends/builtin/echoeffect.h
+--- a/src/effects/backends/builtin/echoeffect.h
++++ b/src/effects/backends/builtin/echoeffect.h
+@@ -24,10 +24,13 @@
+         delay_buf = mixxx::SampleBuffer(kMaxDelaySeconds *
+                 engineParameters.sampleRate() *
+                 engineParameters.channelCount());
++        valid_samples = 0;
+     };
+ 
+     void clear() {
+-        delay_buf.clear();
++        // Invalid history reads as silence until overwritten. Resetting must
++        // not touch a multi-megabyte buffer on the audio callback thread.
++        valid_samples = 0;
+         prev_send = 0.0f;
+         prev_feedback = 0.0f;
+         prev_delay_samples = 0;
+@@ -36,6 +39,7 @@
+     };
+ 
+     mixxx::SampleBuffer delay_buf;
++    int valid_samples;
+     CSAMPLE_GAIN prev_send;
+     CSAMPLE_GAIN prev_feedback;
+     int prev_delay_samples;
+diff --git a/src/test/rx3beatfx_test.cpp b/src/test/rx3beatfx_test.cpp
+--- a/src/test/rx3beatfx_test.cpp
++++ b/src/test/rx3beatfx_test.cpp
+@@ -1105,3 +1105,48 @@
+     EXPECT_DOUBLE_EQ(0, enabled());
+     EXPECT_DOUBLE_EQ(0, ControlObject::get(ConfigKey("[RX3BeatFx]", "xpad_hold")));
+ }
++
++// Compare lazy history invalidation with a physically zeroed reference over
++// delay changes, feedback, full-ring reads, repeated resets and ring wraps.
++TEST(Rx3EchoAudioTest, ResetNeverReplaysOldHistoryAcrossDelayChangesAndWraps) {
++    constexpr int frames = 37;
++    const mixxx::EngineParameters engineParameters(mixxx::audio::SampleRate(8000), frames);
++    const auto manifest = EchoEffect::getManifest();
++    QMap<QString, EngineEffectParameterPointer> parameters;
++    for (const auto& parameter : manifest->parameters()) {
++        parameters.insert(parameter->id(), EngineEffectParameterPointer(new EngineEffectParameter(parameter)));
++    }
++    parameters["rx3_exact_time"]->setValue(1);
++    parameters["quantize"]->setValue(0);
++    parameters["send_amount"]->setValue(.7);
++    parameters["feedback_amount"]->setValue(.8);
++    parameters["pingpong_amount"]->setValue(.4);
++    EchoEffect echo;
++    echo.loadEngineEffectParameters(parameters);
++    EchoGroupState state(engineParameters), reference(engineParameters);
++    std::fill(state.delay_buf.data(), state.delay_buf.data() + state.delay_buf.size(), .875f);
++    reference.delay_buf.clear();
++    reference.valid_samples = reference.delay_buf.size();
++    mixxx::SampleBuffer input(frames * 2), output(frames * 2), expected(frames * 2);
++    GroupFeatureState features;
++    features.beat_length = GroupFeatureBeatLength{1.5, 1};
++    for (int block = 0; block < 4000; ++block) {
++        const double periods[] = {4, .0625, .5, 2};
++        parameters["delay_time"]->setValue(periods[(block / 127) % 4]);
++        for (int sample = 0; sample < frames * 2; ++sample) {
++            input[sample] = block < 1800 ? CSAMPLE(.2 * std::sin((block * frames * 2 + sample) * .17)) : 0;
++        }
++        const bool disabling = block == 5 || block == 43 || block == 1700 || block == 1701 || block == 1900;
++        const auto enabled = disabling ? EffectEnableState::Disabling : EffectEnableState::Enabled;
++        echo.processChannel(&state, input.data(), output.data(), engineParameters, enabled, features);
++        echo.processChannel(&reference, input.data(), expected.data(), engineParameters, enabled, features);
++        if (disabling) {
++            reference.delay_buf.clear();
++            reference.valid_samples = reference.delay_buf.size();
++        }
++        for (int sample = 0; sample < frames * 2; ++sample) {
++            ASSERT_FLOAT_EQ(expected[sample], output[sample]) << "block " << block << " sample " << sample;
++        }
++        if (block == 5) EXPECT_FLOAT_EQ(.875f, state.delay_buf[state.delay_buf.size() - 1]);
++    }
++}

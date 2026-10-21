@@ -1,5 +1,13 @@
 # NauticMixxx native patches
 
+## 0057 — Constant-time ECHO history reset
+
+- Treat delay history preceding the last reset as silence until overwritten.
+  Disable ECHO without clearing its multi-megabyte ring buffer in the audio callback.
+- Preserve both read heads, feedback, ping-pong, delay changes and full-ring reads.
+  A real DSP regression compares repeated resets and ring wraps with a physically
+  zeroed reference, including silent input after reactivation.
+
 ## 0028 — Integrated updates and display corrections for v1.9.1
 
 Adds a signed macOS Sparkle adapter, Qt update choices/status, Windows signed
