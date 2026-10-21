@@ -1,5 +1,15 @@
 # NauticMixxx native patches
 
+## 0061 — USB save I/O outside the GUI state lock
+
+- Snapshot write inputs under a short state lock, perform I/O under a separate
+  device lock, then publish only while the original session/catalog is active.
+- Serialize PDB refresh with writes to avoid invalidating a session because of
+  its own changes. Keep performance/analysis serialization and recovery copies.
+- Check revocation before atomic commits and safely handle missing catalogs in
+  GUI save callbacks. Cover concurrent state readers, refresh, rating/history
+  saves and revoked snapshots with native regressions.
+
 ## 0060 — Performance deck artwork
 
 - Display a 48-pixel cover at the right edge of each PERFORMANCE title rail.

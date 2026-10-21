@@ -1,0 +1,345 @@
+diff --git a/src/library/rekordbox/rekordboxfeature.cpp b/src/library/rekordbox/rekordboxfeature.cpp
+--- a/src/library/rekordbox/rekordboxfeature.cpp
++++ b/src/library/rekordbox/rekordboxfeature.cpp
+@@ -446,11 +446,13 @@
+     auto* watcher = new QFutureWatcher<QString>(this);
+     connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher, root, session, finished, history, name] {
+         const auto error = watcher->result(); watcher->deleteLater(); --m_pendingRatingWrites;
+-        if (error.isEmpty() && m_sessions.value(root) == session) m_devices[root] = session->deviceSnapshot();
+-        if(error.isEmpty() && !history && m_sessions.value(root)==session) {
++        const bool available = m_sessions.value(root) == session && session->state() == mixxx::rekordbox::UsbSessionState::Ready;
++        if (error.isEmpty() && available) m_devices[root] = session->deviceSnapshot();
++        if(error.isEmpty() && !history && available) {
+             auto* tree=m_pSidebarModel->getRootItem();
+             for(int row=0;row<tree->childRows();++row) if(tree->child(row)->getData().toList().value(0).toString()==root) {
+-                const auto playlists=session->catalog()->playlists();
++                const auto catalog = session->catalog();
++                const auto playlists = catalog ? catalog->playlists() : QList<mixxx::rekordbox::RuntimePlaylistNode>{};
+                 if(!playlists.isEmpty() && playlists.last().name==name) {
+                     std::vector<std::unique_ptr<TreeItem>> children;children.push_back(makeRuntimePlaylistItem(root,playlists.last()));
+                     m_pSidebarModel->insertTreeItemRows(std::move(children),tree->child(row)->childRows(),m_pSidebarModel->index(row,0));
+@@ -466,7 +468,8 @@
+ void RekordboxFeature::savePerformance(const QString& root, TrackPointer track, std::function<void(QString)> finished) {
+     const auto session = m_sessions.value(root);
+     if (!session) { finished("USB is unavailable."); return; }
+-    const auto original=session->catalog()->findTrack(track?track->getSourceBinding().rekordboxId():0);
++    const auto catalog = session->catalog();
++    const auto original = catalog ? catalog->findTrack(track ? track->getSourceBinding().rekordboxId() : 0) : std::nullopt;
+     const auto edit = mixxx::rekordbox::capturePerformance(track,original?&*original:nullptr);
+     if (!edit.error.isEmpty()) { finished(edit.error); return; }
+     ++m_pendingRatingWrites; m_discoveryOverlappedWrite |= m_discoveryPending;
+diff --git a/src/library/rekordbox/rekordboxperformancewriter.h b/src/library/rekordbox/rekordboxperformancewriter.h
+--- a/src/library/rekordbox/rekordboxperformancewriter.h
++++ b/src/library/rekordbox/rekordboxperformancewriter.h
+@@ -148,10 +148,14 @@
+     }
+     return result;
+ }
+-inline QString atomicWrite(const QString& path, const QByteArray& bytes) {
++inline QString atomicWrite(const QString& path, const QByteArray& bytes,
++        const std::shared_ptr<const SessionState>& session = {}) {
++    if (session && !session->isActive()) return "USB session is unavailable.";
+     if(QFileInfo(path).isSymLink()) return "Refusing a symbolic link at the USB write destination.";
+     QSaveFile output(path); output.setDirectWriteFallback(false);
+-    if (!output.open(QIODevice::WriteOnly) || output.write(bytes) != bytes.size() || !output.commit()) return output.errorString();
++    if (!output.open(QIODevice::WriteOnly) || output.write(bytes) != bytes.size()) return output.errorString();
++    if (session && !session->isActive()) return "USB session invalidated before commit.";
++    if (!output.commit()) return output.errorString();
+     return {};
+ }
+ } // namespace performance
+@@ -257,7 +261,7 @@
+     }
+     if (!inspectDevice(expected.root).matches(expected) || !session->isActive()) return "USB changed before saving.";
+     for (const auto& file : files) {
+-        const auto error = performance::atomicWrite(file.path + ".nauticmixxx-performance-backup", file.oldBytes);
++        const auto error = performance::atomicWrite(file.path + ".nauticmixxx-performance-backup", file.oldBytes, session);
+         if (!error.isEmpty()) return "Could not save recovery copy: " + error;
+     }
+     int committed = 0;
+@@ -266,7 +270,7 @@
+         const bool valid = session->isActive() && inspectDevice(expected.root).matches(expected) &&
+                 resolvePath(expected.root, file.relative, true) == file.path && current.open(QIODevice::ReadOnly) &&
+                 QCryptographicHash::hash(current.readAll(), QCryptographicHash::Sha256) == QCryptographicHash::hash(file.oldBytes, QCryptographicHash::Sha256);
+-        const auto error = valid ? performance::atomicWrite(file.path, file.newBytes) : QString("USB changed during saving.");
++        const auto error = valid ? performance::atomicWrite(file.path, file.newBytes, session) : QString("USB changed during saving.");
+         if (!error.isEmpty()) {
+             // Roll back only while the original device identity remains valid.
+             for (int i = 0; i < committed && session->isActive() && inspectDevice(expected.root).matches(expected); ++i)
+diff --git a/src/library/rekordbox/rekordboxplaylistwriter.h b/src/library/rekordbox/rekordboxplaylistwriter.h
+--- a/src/library/rekordbox/rekordboxplaylistwriter.h
++++ b/src/library/rekordbox/rekordboxplaylistwriter.h
+@@ -112,7 +112,8 @@
+ }
+ } // namespace playlistwriter
+ inline QString writeUsbList(DeviceSnapshot* expected, const QString& name, const QList<quint32>& ids,
+-        bool history, quint32* newId) {
++        bool history, quint32* newId, const std::shared_ptr<const SessionState>& session = {}) {
++    if (session && !session->isActive()) return "USB session is unavailable.";
+     const auto path = resolvePath(expected->root, "PIONEER/rekordbox/export.pdb");
+     if (path.isEmpty() || path != expected->databasePath || !inspectDevice(expected->root).matches(*expected)) return "USB is unavailable or changed.";
+     QLockFile lock(path + ".nauticmixxx.lock"); if (!lock.tryLock(0)) return "Another USB update is in progress.";
+@@ -120,10 +121,10 @@
+     if (!document.valid() || QCryptographicHash::hash(document.bytes, QCryptographicHash::Sha256) != expected->fingerprint) return "USB database changed.";
+     QByteArray modified = document.bytes;
+     auto error = playlistwriter::addList(modified, name, ids, history, newId); if (!error.isEmpty()) return error;
+-    error = performance::atomicWrite(path + ".nauticmixxx-playlist-backup", document.bytes);
++    error = performance::atomicWrite(path + ".nauticmixxx-playlist-backup", document.bytes, session);
+     if (!error.isEmpty()) return "Could not save USB recovery copy: " + error;
+     if (!inspectDevice(expected->root).matches(*expected) || resolvePath(expected->root, "PIONEER/rekordbox/export.pdb") != path) return "USB changed before committing.";
+-    error = performance::atomicWrite(path, modified);
++    error = performance::atomicWrite(path, modified, session);
+     if (!error.isEmpty()) return "Could not save USB playlist: " + error;
+     expected->fingerprint = QCryptographicHash::hash(modified, QCryptographicHash::Sha256); return {};
+ }
+diff --git a/src/library/rekordbox/rekordboxratingwriter.h b/src/library/rekordbox/rekordboxratingwriter.h
+--- a/src/library/rekordbox/rekordboxratingwriter.h
++++ b/src/library/rekordbox/rekordboxratingwriter.h
+@@ -6,14 +6,18 @@
+ #include <QLockFile>
+ #include <QSaveFile>
+ #include <QtEndian>
++#include <memory>
+ #include "library/rekordbox/rekordboxdatabase.h"
+ #include "library/rekordbox/rekordboxdevice.h"
++#include "library/rekordbox/rekordboxsessionstate.h"
+ 
+ namespace mixxx::rekordbox {
+ // Explicit fixed-field edit. Generic tag/collection writers still treat USB
+ // exports as read-only. No table rebuilding, track IDs or ANLZ bytes change.
+ inline QString writeUsbRating(const DeviceSnapshot& expected,quint32 trackId,
+-        const QString& expectedAudioPath,int rating,QByteArray* newFingerprint) {
++        const QString& expectedAudioPath,int rating,QByteArray* newFingerprint,
++        const std::shared_ptr<const SessionState>& session = {}) {
++    if (session && !session->isActive()) return "USB session is unavailable.";
+     if(rating<0 || rating>5 || !trackId) return QStringLiteral("Invalid rating.");
+     const auto path=resolvePath(expected.root,"PIONEER/rekordbox/export.pdb");
+     if(path.isEmpty() || path!=expected.databasePath)
+@@ -40,13 +44,15 @@
+     // Keep one bounded recovery copy, replacing it only before a validated edit.
+     QSaveFile backup(path+".nauticmixxx-rating-backup");
+     backup.setDirectWriteFallback(false);
+-    if(!backup.open(QIODevice::WriteOnly) || backup.write(document.bytes)!=document.bytes.size() || !backup.commit())
++    if(!backup.open(QIODevice::WriteOnly) || backup.write(document.bytes)!=document.bytes.size())
+         return QStringLiteral("Could not save the USB rating backup: ")+backup.errorString();
++    if (session && !session->isActive()) return "USB session invalidated before saving.";
++    if (!backup.commit()) return QStringLiteral("Could not save the USB rating backup: ") + backup.errorString();
+     QSaveFile output(path);output.setDirectWriteFallback(false);
+     if(!output.open(QIODevice::WriteOnly) || output.write(modified)!=modified.size())
+         return QStringLiteral("Could not write the USB rating: ")+output.errorString();
+     const auto current=inspectDevice(expected.root);
+-    if(!current.matches(expected) || current.databasePath!=path ||
++    if((session && !session->isActive()) || !current.matches(expected) || current.databasePath!=path ||
+             resolvePath(expected.root,"PIONEER/rekordbox/export.pdb")!=path)
+         return QStringLiteral("USB changed during rating update. Original export retained.");
+     if(!output.commit()) return QStringLiteral("Could not commit the USB rating: ")+output.errorString();
+diff --git a/src/library/rekordbox/rekordboxusbsession.cpp b/src/library/rekordbox/rekordboxusbsession.cpp
+--- a/src/library/rekordbox/rekordboxusbsession.cpp
++++ b/src/library/rekordbox/rekordboxusbsession.cpp
+@@ -289,43 +289,78 @@
+ }
+ 
+ QString RekordboxUsbSession::writeList(const QString& name, const QList<quint32>& ids, bool history) {
+-    const std::lock_guard<std::mutex> lock(m_mutex);
+-    if (m_state != UsbSessionState::Ready || !m_catalog || !m_sessionState->isActive()) return "USB session is unavailable.";
+-    quint32 id = 0; const auto error = writeUsbList(&m_snapshot, name, ids, history, &id);
+-    if (error.isEmpty()) {
+-        if (history) m_catalog->appendHistory({id, name.trimmed(), ids});
+-        else { RuntimePlaylistNode playlist; playlist.rekordboxId = id; playlist.name = name.trimmed(); playlist.trackIds = ids; m_catalog->appendPlaylist(playlist); }
+-    }
+-    return error;
++    const std::lock_guard<std::mutex> deviceLock(m_deviceMutex);
++    DeviceSnapshot snapshot;
++    std::shared_ptr<RuntimeCatalog> catalog;
++    {
++        const std::lock_guard<std::mutex> lock(m_mutex);
++        if (m_state != UsbSessionState::Ready || !m_catalog || !m_sessionState->isActive()) return "USB session is unavailable.";
++        snapshot = m_snapshot;
++        catalog = m_catalog;
++    }
++    quint32 id = 0;
++    const auto error = writeUsbList(&snapshot, name, ids, history, &id, m_sessionState);
++    if (!error.isEmpty()) return error;
++    const std::lock_guard<std::mutex> lock(m_mutex);
++    if (m_state != UsbSessionState::Ready || m_catalog != catalog || !m_sessionState->isActive())
++        return "USB session invalidated during saving.";
++    m_snapshot = snapshot;
++    if (history) catalog->appendHistory({id, name.trimmed(), ids});
++    else {
++        RuntimePlaylistNode playlist;
++        playlist.rekordboxId = id; playlist.name = name.trimmed(); playlist.trackIds = ids;
++        catalog->appendPlaylist(std::move(playlist));
++    }
++    return {};
+ }
+ 
+ QString RekordboxUsbSession::writePerformance(const PerformanceEdit& edit) {
+     const std::lock_guard<std::mutex> analysisLock(m_analysisMutex);
+-    const std::lock_guard<std::mutex> lock(m_mutex);
+-    if (m_state != UsbSessionState::Ready || !m_catalog || !m_sessionState->isActive()) return "USB session is unavailable.";
+-    auto track = m_catalog->findTrack(edit.trackId);
++    const std::lock_guard<std::mutex> deviceLock(m_deviceMutex);
++    DeviceSnapshot snapshot;
++    std::shared_ptr<RuntimeCatalog> catalog;
++    std::optional<RuntimeTrack> track;
++    {
++        const std::lock_guard<std::mutex> lock(m_mutex);
++        if (m_state != UsbSessionState::Ready || !m_catalog || !m_sessionState->isActive()) return "USB session is unavailable.";
++        snapshot = m_snapshot;
++        catalog = m_catalog;
++        track = catalog->findTrack(edit.trackId);
++    }
+     if (!track) return "Unknown USB track.";
+     if (track->analysisState == RuntimeAnalysisState::Unknown)
+         return "Load the USB track before saving its performance data.";
+-    const auto error = writeUsbPerformance(m_snapshot, &*track, edit, m_sessionState);
+-    if (error.isEmpty()) {
+-        for (auto& waveform : track->waveforms) waveform.sessionId = m_sessionId;
+-        m_catalog->updatePerformance(*track);
+-    }
+-    return error;
+-}
+-
+-QString RekordboxUsbSession::writeRating(quint32 trackId,int rating) {
+-    const std::lock_guard<std::mutex> lock(m_mutex);
+-    if(m_state!=UsbSessionState::Ready || !m_catalog || !m_sessionState->isActive())
+-        return QStringLiteral("USB session is unavailable.");
+-    const auto track=m_catalog->findTrack(trackId);
+-    if(!track) return QStringLiteral("Unknown USB track.");
++    const auto error = writeUsbPerformance(snapshot, &*track, edit, m_sessionState);
++    if (!error.isEmpty()) return error;
++    const std::lock_guard<std::mutex> lock(m_mutex);
++    if (m_state != UsbSessionState::Ready || m_catalog != catalog || !m_sessionState->isActive())
++        return "USB session invalidated during saving.";
++    for (auto& waveform : track->waveforms) waveform.sessionId = m_sessionId;
++    catalog->updatePerformance(*track);
++    return {};
++}
++
++QString RekordboxUsbSession::writeRating(quint32 trackId, int rating) {
++    const std::lock_guard<std::mutex> deviceLock(m_deviceMutex);
++    DeviceSnapshot snapshot;
++    std::shared_ptr<RuntimeCatalog> catalog;
++    std::optional<RuntimeTrack> track;
++    {
++        const std::lock_guard<std::mutex> lock(m_mutex);
++        if (m_state != UsbSessionState::Ready || !m_catalog || !m_sessionState->isActive()) return "USB session is unavailable.";
++        snapshot = m_snapshot;
++        catalog = m_catalog;
++        track = catalog->findTrack(trackId);
++    }
++    if (!track) return "Unknown USB track.";
+     QByteArray fingerprint;
+-    const auto error=writeUsbRating(m_snapshot,trackId,track->audioRelativePath,rating,&fingerprint);
+-    if(!error.isEmpty()) return error;
+-    m_snapshot.fingerprint=fingerprint;
+-    m_catalog->updateRating(trackId,rating);
++    const auto error = writeUsbRating(snapshot, trackId, track->audioRelativePath, rating, &fingerprint, m_sessionState);
++    if (!error.isEmpty()) return error;
++    const std::lock_guard<std::mutex> lock(m_mutex);
++    if (m_state != UsbSessionState::Ready || m_catalog != catalog || !m_sessionState->isActive())
++        return "USB session invalidated during saving.";
++    m_snapshot.fingerprint = fingerprint;
++    catalog->updateRating(trackId, rating);
+     return {};
+ }
+ 
+@@ -504,6 +539,7 @@
+ }
+ 
+ bool RekordboxUsbSession::refresh() {
++    const std::lock_guard<std::mutex> deviceLock(m_deviceMutex);
+     DeviceSnapshot expected;
+     QString root;
+     {
+diff --git a/src/library/rekordbox/rekordboxusbsession.h b/src/library/rekordbox/rekordboxusbsession.h
+--- a/src/library/rekordbox/rekordboxusbsession.h
++++ b/src/library/rekordbox/rekordboxusbsession.h
+@@ -84,6 +84,9 @@
+     // hold m_mutex, so invalidation can still revoke an in-flight inspection.
+     std::mutex m_analysisMutex;
+     std::atomic<int> m_foregroundAnalysisRequests{0};
++    // Serialize PDB validation with writes, never with GUI state queries.
++    // When both are needed: analysis -> device I/O -> short state lock.
++    std::mutex m_deviceMutex;
+     mutable std::mutex m_mutex;
+     QString m_root;
+     const std::shared_ptr<SessionState> m_sessionState;
+diff --git a/src/test/rekordboxusbsession_test.cpp b/src/test/rekordboxusbsession_test.cpp
+--- a/src/test/rekordboxusbsession_test.cpp
++++ b/src/test/rekordboxusbsession_test.cpp
+@@ -2411,3 +2411,74 @@
+     QCoreApplication::processEvents();
+     EXPECT_EQ(0, oldDeliveries);
+ }
++
++TEST(RekordboxUsbSessionTest, StateReadersAndRefreshRemainCoherentDuringConcurrentSaves) {
++    QTemporaryDir volume;
++    auto data = rows();
++    for (quint32 id = 2; id <= 1000; ++id)
++        data.append({0, track(id, QString("/Contents/%1.mp3").arg(id).toUtf8())});
++    ASSERT_TRUE(write(pdb(volume), database(data)));
++    RekordboxUsbSession session(volume.path());
++    ASSERT_TRUE(session.load());
++    std::atomic<bool> finished{false};
++    std::atomic<int> refreshErrors{0};
++    QString writeError;
++    QSemaphore start;
++    std::thread writer([&] {
++        start.release();
++        for (int rating = 0; rating < 10; ++rating) {
++            writeError = session.writeRating(1, rating % 6);
++            if (!writeError.isEmpty()) break;
++        }
++        if (writeError.isEmpty()) writeError = session.writeList("Concurrent history", {1}, true);
++        finished.store(true);
++    });
++    start.acquire();
++    std::thread refresher([&] {
++        for (int i = 0; i < 20; ++i) if (!session.refresh()) ++refreshErrors;
++    });
++    int reads = 0;
++    qint64 maximumReadNs = 0;
++    while (!finished.load()) {
++        QElapsedTimer elapsed; elapsed.start();
++        EXPECT_EQ(UsbSessionState::Ready, session.state());
++        EXPECT_TRUE(session.catalog());
++        EXPECT_TRUE(session.sessionState());
++        maximumReadNs = std::max(maximumReadNs, elapsed.nsecsElapsed());
++        ++reads;
++        std::this_thread::yield();
++    }
++    writer.join();
++    refresher.join();
++    EXPECT_TRUE(writeError.isEmpty()) << writeError.toStdString();
++    EXPECT_EQ(0, refreshErrors.load());
++    EXPECT_TRUE(session.refresh());
++    EXPECT_EQ(3u, session.catalog()->findTrack(1)->rating);
++    EXPECT_EQ(1, session.catalog()->histories().size());
++    RecordProperty("state_reads_during_saves", reads);
++    RecordProperty("maximum_state_read_us", std::to_string(maximumReadNs / 1000.0));
++}
++
++TEST(RekordboxUsbSessionTest, RevokedWriteSnapshotsCannotCommitOrRepublishCatalog) {
++    QTemporaryDir volume;
++    const auto original = database(rows());
++    ASSERT_TRUE(write(pdb(volume), original));
++    RekordboxUsbSession session(volume.path());
++    ASSERT_TRUE(session.load());
++    auto snapshot = session.deviceSnapshot();
++    const auto token = session.sessionState();
++    const auto catalog = session.catalog();
++    session.invalidate();
++    QByteArray fingerprint;
++    quint32 id = 0;
++    EXPECT_FALSE(writeUsbRating(snapshot, 1, "/Contents/test.mp3", 5, &fingerprint, token).isEmpty());
++    EXPECT_FALSE(writeUsbList(&snapshot, "Stale", {1}, false, &id, token).isEmpty());
++    EXPECT_FALSE(session.writeRating(1, 5).isEmpty());
++    EXPECT_FALSE(session.writeList("Stale", {1}, false).isEmpty());
++    EXPECT_FALSE(catalog->valid());
++    EXPECT_FALSE(session.catalog());
++    QFile unchanged(pdb(volume)); ASSERT_TRUE(unchanged.open(QIODevice::ReadOnly));
++    EXPECT_EQ(original, unchanged.readAll());
++    EXPECT_FALSE(QFileInfo::exists(pdb(volume) + ".nauticmixxx-rating-backup"));
++    EXPECT_FALSE(QFileInfo::exists(pdb(volume) + ".nauticmixxx-playlist-backup"));
++}

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep GUI USB state queries responsive during rating, playlist/history and performance saves. Serialize PDB validation with writes, reject revoked commits, and avoid publishing stale save results after disconnection.
+
 - Project USB tracks off the GUI thread for LOAD, double-click, headphone touch preview and CONTINUE. Discard superseded or disconnected requests, recheck playing-deck protection, and prevent released previews from starting late.
 
 - Show each deck's artwork at the right edge of its PERFORMANCE track-title rail, including exported Rekordbox USB covers and a placeholder when no image is available.
