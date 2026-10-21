@@ -5,7 +5,7 @@
     <Layout>vertical</Layout>
     <SizePolicy>i,me</SizePolicy>
     <Children>
-      <!-- RX3 title rail: deck badge and track title span the full card. -->
+      <!-- RX3 title rail: artwork stays at the right edge of each deck. -->
       <WidgetGroup>
         <ObjectName>DeckHeader</ObjectName>
         <Layout>horizontal</Layout>
@@ -35,6 +35,12 @@
               <BindProperty>visible</BindProperty>
             </Connection>
           </WidgetGroup>
+          <CoverArt>
+            <ObjectName>DeckArtwork</ObjectName>
+            <Group>[Channel<Variable name="channel"/>]</Group>
+            <Size>48f,48f</Size><SizePolicy>f,f</SizePolicy>
+            <BgColor>#202020</BgColor>
+          </CoverArt>
         </Children>
       </WidgetGroup>
 

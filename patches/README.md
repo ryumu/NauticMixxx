@@ -1,5 +1,16 @@
 # NauticMixxx native patches
 
+## 0060 — Performance deck artwork
+
+- Display a 48-pixel cover at the right edge of each PERFORMANCE title rail.
+- Decode bounded exported artwork during the existing background USB track
+  load. Retain an in-memory thumbnail without handing removable paths to the
+  asynchronous library cover cache. Missing or invalid artwork uses the normal
+  placeholder and never prevents audio loading.
+- Keep USB cover previews read-only, preserve image proportions, and clear the
+  previous cover on track changes. Cover real image rendering and resize,
+  removal, fallback, and invalid export paths in native tests.
+
 ## 0059 — Asynchronous USB track loading
 
 - Run selected-track analysis, waveform reads and temporary Track construction

@@ -1,0 +1,298 @@
+diff --git a/src/library/rekordbox/rekordboxusbsession.cpp b/src/library/rekordbox/rekordboxusbsession.cpp
+--- a/src/library/rekordbox/rekordboxusbsession.cpp
++++ b/src/library/rekordbox/rekordboxusbsession.cpp
+@@ -6,6 +6,8 @@
+ #include <QFile>
+ #include <QDateTime>
+ #include <QElapsedTimer>
++#include <QBuffer>
++#include <QImageReader>
+ #include <QCoreApplication>
+ #include <QFutureWatcher>
+ #include <QtConcurrentRun>
+@@ -693,6 +695,7 @@
+     if (!runtimeTrack) return {};
+     if (cancelled && cancelled->load()) return {};
+     std::shared_ptr<const SessionState> sessionState;
++    QString root;
+     {
+         const std::lock_guard<std::mutex> lock(m_mutex);
+         if (m_state != UsbSessionState::Ready || !m_catalog ||
+@@ -703,6 +706,7 @@
+             return {};
+         }
+         sessionState = m_sessionState;
++        root = m_root;
+     }
+     // Load each native style and preview on demand; mounting stays descriptor-only.
+     const auto waveformPriority = [](const RuntimeWaveform& waveform) {
+@@ -748,8 +752,37 @@
+         }
+     }
+     if (cancelled && cancelled->load()) return {};
+-    return RekordboxTrackAdapter::createTemporaryTrack(
++    // Read only the selected track's exported artwork, on the load worker.
++    // Retain pixels instead of an unguarded path for later GUI/cache reads.
++    QImage artwork;
++    const auto artworkPath = runtimeTrack->artworkRelativePath.isEmpty() ? QString() :
++            resolvePath(root, runtimeTrack->artworkRelativePath, true);
++    if (sessionState->isActive() && !artworkPath.isEmpty() && QFileInfo(artworkPath).isFile()) {
++        QFile file(artworkPath);
++        constexpr qint64 kMaxArtworkBytes = 8 * 1024 * 1024;
++        if (file.open(QIODevice::ReadOnly) && file.size() <= kMaxArtworkBytes) {
++            auto bytes = file.read(kMaxArtworkBytes + 1);
++            if (bytes.size() <= kMaxArtworkBytes) {
++                QBuffer buffer(&bytes);
++                buffer.open(QIODevice::ReadOnly);
++                QImageReader reader(&buffer);
++                const auto dimensions = reader.size();
++                if (dimensions.isValid() &&
++                        qint64(dimensions.width()) * dimensions.height() <= 16 * 1024 * 1024) {
++                    if (dimensions.width() > 512 || dimensions.height() > 512) {
++                        reader.setScaledSize(dimensions.scaled(512, 512, Qt::KeepAspectRatio));
++                    }
++                    artwork = reader.read();
++                }
++            }
++        }
++        if (!refresh()) return {};
++    }
++    if (cancelled && cancelled->load()) return {};
++    auto projected = RekordboxTrackAdapter::createTemporaryTrack(
+             *runtimeTrack, sessionState, std::move(loadedWaveforms), error);
++    if (projected) projected->setProperty("rekordboxArtwork", artwork);
++    return projected;
+ }
+ void RekordboxUsbSession::requestTemporaryTrack(std::shared_ptr<RekordboxUsbSession> session,
+         quint32 rekordboxId, QObject* context, std::function<void(TrackPointer)> ready,
+@@ -775,7 +808,10 @@
+             });
+     auto* guiThread = QCoreApplication::instance()->thread();
+     watcher->setFuture(QtConcurrent::run([session = std::move(session), rekordboxId, guiThread, cancelled] {
+-        auto track = session ? session->createTemporaryTrack(rekordboxId, nullptr, cancelled) : TrackPointer();
++        QString error;
++        auto track = session ? session->createTemporaryTrack(rekordboxId, &error, cancelled) : TrackPointer();
++        if (!track && !cancelled->load() && !error.isEmpty())
++            qWarning() << "Cannot project Rekordbox USB track" << rekordboxId << error;
+         // Like GlobalTrackCache, move newly created QObjects off the worker
+         // before delivery; pool threads have no event loop for Track slots.
+         if (track) track->moveToThread(guiThread);
+diff --git a/src/test/rekordboxusbsession_test.cpp b/src/test/rekordboxusbsession_test.cpp
+--- a/src/test/rekordboxusbsession_test.cpp
++++ b/src/test/rekordboxusbsession_test.cpp
+@@ -22,6 +22,7 @@
+ #include <QSet>
+ #include <QSqlQuery>
+ #include <QTemporaryDir>
++#include <QImage>
+ #include <QtEndian>
+
+ #include "library/rekordbox/rekordboxdatabase.h"
+@@ -38,6 +39,8 @@
+ #include "track/track.h"
+ #include "util/samplebuffer.h"
+ #include "widget/wtracktableview.h"
++#include "widget/wcoverart.h"
++#include "skin/legacy/skincontext.h"
+
+ namespace {
+ using namespace mixxx::rekordbox;
+@@ -811,6 +814,78 @@
+     EXPECT_EQ(result->artworkId, 0xffffffffu);
+     EXPECT_EQ(result->artworkRelativePath, "/PIONEER/art.jpg");
+     EXPECT_EQ(result->resolvedArtworkPath, volume.filePath("PIONEER/art.jpg"));
++}
++
++class RekordboxArtworkTest : public LibraryTest {};
++
++TEST_F(RekordboxArtworkTest, ExportedArtworkRendersAndClearsWhenTrackChanges) {
++    QTemporaryDir volume;
++    auto song = track();
++    put32(&song, 28, 7);
++    QByteArray artworkRow(4, '\0');
++    put32(&artworkRow, 0, 7);
++    ASSERT_TRUE(write(pdb(volume), database({{0, song},
++            {13, artworkRow + text("/PIONEER/art.png")}})));
++    ASSERT_TRUE(write(volume.filePath("Contents/test.mp3"), "audio fixture"));
++    QImage artwork(800, 400, QImage::Format_RGB32);
++    artwork.fill(Qt::red);
++    ASSERT_TRUE(artwork.save(volume.filePath("PIONEER/art.png")));
++    RekordboxUsbSession session(volume.path());
++    ASSERT_TRUE(session.load());
++    auto projected = session.createTemporaryTrack(1);
++    ASSERT_TRUE(projected);
++    const auto snapshot = projected->property("rekordboxArtwork").value<QImage>();
++    ASSERT_EQ(QSize(512, 256), snapshot.size());
++    EXPECT_FALSE(projected->getCoverInfo().hasImage()); // no deferred USB path
++    EXPECT_FALSE(projected->getId().isValid());
++
++    WCoverArt cover(nullptr, config(), "[Channel1]", nullptr);
++    QDomDocument xml;
++    ASSERT_TRUE(xml.setContent(QStringLiteral("<CoverArt><BgColor>#202020</BgColor></CoverArt>")));
++    SkinContext context(config(), QString());
++    cover.resize(48, 48);
++    cover.setup(xml.documentElement(), context);
++    cover.show();
++    cover.slotLoadTrack(projected);
++    QCoreApplication::processEvents();
++    const auto centerColor = [&cover] {
++        const auto image = cover.grab().toImage();
++        return image.pixelColor(image.width() / 2, image.height() / 2);
++    };
++    EXPECT_EQ(QColor(Qt::red), centerColor());
++    EXPECT_EQ(QColor("#202020"), cover.grab().toImage().pixelColor(24, 2));
++
++    // Rendering and resizing use the snapshot even after removal.
++    ASSERT_TRUE(QFile::remove(volume.filePath("PIONEER/art.png")));
++    session.invalidate();
++    cover.resize(72, 72);
++    EXPECT_EQ(QColor(Qt::red), centerColor());
++    cover.slotLoadingTrack({}, projected);
++    EXPECT_NE(QColor(Qt::red), centerColor());
++    cover.slotLoadTrack(Track::newTemporary());
++    EXPECT_NE(QColor(Qt::red), centerColor());
++}
++
++TEST_F(RekordboxArtworkTest, MissingCorruptOversizedAndEscapingArtworkDoNotBlockLoading) {
++    for (const QString& kind : {QStringLiteral("missing"), QStringLiteral("corrupt"),
++                 QStringLiteral("oversized"), QStringLiteral("escape")}) {
++        SCOPED_TRACE(kind.toStdString());
++        QTemporaryDir volume;
++        auto song = track();
++        put32(&song, 28, 7);
++        QByteArray artworkRow(4, '\0');
++        put32(&artworkRow, 0, 7);
++        const auto path = kind == "escape" ? "/../outside.png" : "/PIONEER/art.png";
++        ASSERT_TRUE(write(pdb(volume), database({{0, song}, {13, artworkRow + text(path)}})));
++        ASSERT_TRUE(write(volume.filePath("Contents/test.mp3"), "audio fixture"));
++        if (kind == "corrupt") ASSERT_TRUE(write(volume.filePath("PIONEER/art.png"), "not an image"));
++        if (kind == "oversized") ASSERT_TRUE(write(volume.filePath("PIONEER/art.png"), QByteArray(8 * 1024 * 1024 + 1, 'x')));
++        RekordboxUsbSession session(volume.path());
++        ASSERT_TRUE(session.load());
++        const auto projected = session.createTemporaryTrack(1);
++        ASSERT_TRUE(projected);
++        EXPECT_TRUE(projected->property("rekordboxArtwork").value<QImage>().isNull());
++    }
+ }
+
+ TEST(RekordboxUsbSessionTest, DoesNotInventAbsentBpmOrOutOfRangeRating) {
+diff --git a/src/widget/wcoverart.cpp b/src/widget/wcoverart.cpp
+--- a/src/widget/wcoverart.cpp
++++ b/src/widget/wcoverart.cpp
+@@ -26,7 +26,8 @@
+           m_bEnable(true),
+           m_pMenu(new WCoverArtMenu(this)),
+           m_pPlayer(pPlayer),
+-          m_pDlgFullSize(new DlgCoverArtFullSize(this, pPlayer, m_pMenu)) {
++          m_pDlgFullSize(new DlgCoverArtFullSize(this, pPlayer, m_pMenu)),
++          m_pDlgUsbCover(new DlgCoverArtFullSize(this, nullptr, nullptr)) {
+     // Accept drops if we have a group to load tracks into.
+     setAcceptDrops(!m_group.isEmpty());
+
+@@ -52,6 +53,7 @@
+ WCoverArt::~WCoverArt() {
+     delete m_pMenu;
+     delete m_pDlgFullSize;
++    delete m_pDlgUsbCover;
+ }
+
+ void WCoverArt::setup(const QDomNode& node, const SkinContext& context) {
+@@ -93,7 +95,7 @@
+ }
+
+ void WCoverArt::slotReloadCoverArt() {
+-    if (!m_loadedTrack) {
++    if (!m_loadedTrack || m_loadedTrack->getSourceBinding().sourceType() == mixxx::SourceType::RekordboxUsb) {
+         return;
+     }
+     const auto future = guessTrackCoverInfoConcurrently(m_loadedTrack);
+@@ -125,6 +127,7 @@
+ }
+
+ void WCoverArt::slotReset() {
++    m_pDlgUsbCover->close();
+     if (m_loadedTrack) {
+         disconnect(
+                 m_loadedTrack.get(),
+@@ -141,6 +144,14 @@
+
+ void WCoverArt::slotTrackCoverArtUpdated() {
+     if (m_loadedTrack) {
++        if (m_loadedTrack->getSourceBinding().sourceType() == mixxx::SourceType::RekordboxUsb) {
++            // USB projection owns an immutable, bounded image snapshot. Never
++            // send a removable file path to the ordinary cover cache.
++            m_loadedCover = QPixmap::fromImage(m_loadedTrack->property("rekordboxArtwork").value<QImage>());
++            m_loadedCoverScaled = scaledCoverArt(m_loadedCover);
++            update();
++            return;
++        }
+         CoverArtCache::requestTrackCover(this, m_loadedTrack);
+     }
+ }
+@@ -155,6 +166,7 @@
+
+     if (pRequester == this &&
+             m_loadedTrack &&
++            m_loadedTrack->getSourceBinding().sourceType() != mixxx::SourceType::RekordboxUsb &&
+             m_loadedTrack->getLocation() == coverInfo.trackLocation) {
+         m_lastRequestedCover = coverInfo;
+         m_loadedCover = pixmap;
+@@ -164,6 +176,7 @@
+ }
+
+ void WCoverArt::slotLoadTrack(TrackPointer pTrack) {
++    m_pDlgUsbCover->close();
+     if (m_loadedTrack) {
+         disconnect(m_loadedTrack.get(),
+                 &Track::coverArtUpdated,
+@@ -217,7 +230,7 @@
+
+     if (!toDraw.isNull()) {
+         QSize widgetSize = size();
+-        QSize pixmapSize = toDraw.size();
++        QSize pixmapSize = toDraw.size() / toDraw.devicePixelRatioF();
+
+         int x = math_max(0, (widgetSize.width() - pixmapSize.width()) / 2);
+         int y = math_max(0, (widgetSize.height() - pixmapSize.height()) / 2);
+@@ -232,7 +245,7 @@
+
+ void WCoverArt::contextMenuEvent(QContextMenuEvent* pEvent) {
+     pEvent->accept();
+-    if (m_loadedTrack) {
++    if (m_loadedTrack && m_loadedTrack->getSourceBinding().sourceType() != mixxx::SourceType::RekordboxUsb) {
+         m_pMenu->setCoverArt(m_lastRequestedCover);
+         m_pMenu->popup(pEvent->globalPos());
+     }
+@@ -262,14 +275,20 @@
+     if (pEvent->button() == Qt::LeftButton &&
+             m_loadedTrack &&
+             m_clickTimer.isActive()) { // init/close fullsize cover
+-        if (m_pDlgFullSize->isVisible()) {
++        if (m_pDlgUsbCover->isVisible()) {
++            m_pDlgUsbCover->close();
++        } else if (m_pDlgFullSize->isVisible()) {
+             m_pDlgFullSize->close();
+         } else if (!m_loadedCover.isNull()) {
+             // Only show the fullsize cover art dialog if the current track
+             // actually has a cover.  The `init` method already shows the
+             // window and then emits a signal to load the cover, so this can't
+             // be handled by the method itself.
+-            m_pDlgFullSize->init(m_loadedTrack);
++            if (m_loadedTrack->getSourceBinding().sourceType() == mixxx::SourceType::RekordboxUsb) {
++                m_pDlgUsbCover->initFetchedCoverArt(m_loadedCover);
++            } else {
++                m_pDlgFullSize->init(m_loadedTrack);
++            }
+         }
+     } // else it was a long leftclick or a right click that's already been processed
+ }
+diff --git a/src/widget/wcoverart.h b/src/widget/wcoverart.h
+--- a/src/widget/wcoverart.h
++++ b/src/widget/wcoverart.h
+@@ -71,5 +71,6 @@
+     CoverInfo m_lastRequestedCover;
+     BaseTrackPlayer* m_pPlayer;
+     DlgCoverArtFullSize* m_pDlgFullSize;
++    DlgCoverArtFullSize* m_pDlgUsbCover;
+     QTimer m_clickTimer;
+ };
