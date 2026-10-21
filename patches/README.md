@@ -1,5 +1,14 @@
 # NauticMixxx native patches
 
+## 0062 — Incremental USB play history
+
+- Consume newly played tracks once and resolve USB roots by session identity and
+  indexed Rekordbox track ID. Idle ticks inspect active sessions only.
+- Retain ordered, deduplicated history and retry failed saves without rescanning
+  prior tracks. Discard disconnected histories and isolate replacement devices.
+- Cover 1000 idle ticks, incremental additions, repeated IDs and replacement at
+  the same mount point with native regressions.
+
 ## 0061 — USB save I/O outside the GUI state lock
 
 - Snapshot write inputs under a short state lock, perform I/O under a separate

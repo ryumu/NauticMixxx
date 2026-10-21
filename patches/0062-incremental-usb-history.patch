@@ -1,0 +1,201 @@
+diff --git a/src/library/rekordbox/rekordboxfeature.cpp b/src/library/rekordbox/rekordboxfeature.cpp
+--- a/src/library/rekordbox/rekordboxfeature.cpp
++++ b/src/library/rekordbox/rekordboxfeature.cpp
+@@ -435,6 +435,17 @@
+         for(const auto& track:tracks) if(track.resolvedAudioPath==location) {
+             if(root) *root=it.key();return track;
+         }
++    }
++    return {};
++}
++
++QString RekordboxFeature::rootForBinding(const mixxx::SourceBinding& binding) const {
++    if (binding.sourceType() != mixxx::SourceType::RekordboxUsb || !binding.isSessionLive()) return {};
++    for (auto it = m_sessions.cbegin(); it != m_sessions.cend(); ++it) {
++        const auto state = it.value()->sessionState();
++        if (!state || !(state->identifier() == binding.sessionIdentifier())) continue;
++        const auto catalog = it.value()->catalog();
++        if (catalog && catalog->findTrack(binding.rekordboxId())) return it.key();
+     }
+     return {};
+ }
+diff --git a/src/library/rekordbox/rekordboxfeature.h b/src/library/rekordbox/rekordboxfeature.h
+--- a/src/library/rekordbox/rekordboxfeature.h
++++ b/src/library/rekordbox/rekordboxfeature.h
+@@ -21,6 +21,7 @@
+ #include "library/treeitemmodel.h"
+ #include "util/parented_ptr.h"
+ #include "util/sandbox.h"
++#include "track/sourcebinding.h"
+ 
+ class RekordboxFeature final : public LibraryFeature {
+     Q_OBJECT
+@@ -37,6 +38,7 @@
+     std::shared_ptr<const mixxx::rekordbox::RuntimeCatalog> catalogForRoot(
+             const QString& root) const;
+     std::optional<mixxx::rekordbox::RuntimeTrack> infoForLocation(const QString& location,QString* root) const;
++    QString rootForBinding(const mixxx::SourceBinding& binding) const;
+     TrackPointer temporaryTrackForRoot(const QString& root,quint32 id,QString* error=nullptr) const {
+         const auto session=m_sessions.value(root);return session?session->createTemporaryTrack(id,error):TrackPointer();
+     }
+diff --git a/src/test/rx3display_test.cpp b/src/test/rx3display_test.cpp
+--- a/src/test/rx3display_test.cpp
++++ b/src/test/rx3display_test.cpp
+@@ -2645,3 +2645,55 @@
+     EXPECT_DOUBLE_EQ(.9, position.get());
+     preview.cancel();
+ }
++
++class Rx3UsbHistoryTest : public MixxxTest {};
++TEST_F(Rx3UsbHistoryTest, IdleTicksResolveOnlyNewUsbTracksAndPreserveOrder) {
++    auto session = std::make_shared<mixxx::rekordbox::SessionState>();
++    auto make = [&](quint32 id) {
++        return Track::newTemporary(mixxx::FileAccess(mixxx::FileInfo(QString("/tmp/history-%1.wav").arg(id))),
++                mixxx::TrackUsePolicy::rekordboxUsbPolicy(), mixxx::SourceBinding::rekordboxUsb(id, session));
++    };
++    const auto first = make(1), second = make(2), third = make(3);
++    const auto local = Track::newTemporary(mixxx::FileAccess(mixxx::FileInfo("/tmp/local.wav")));
++    QList<TrackPointer> played{first, local, second};
++    int lookups = 0;
++    auto root = [&](const mixxx::SourceBinding&) { ++lookups; return QString("/usb"); };
++    rx3::UsbHistoryLedger history;
++    history.collect(played, root);
++    ASSERT_EQ(2, lookups);
++    for (int tick = 0; tick < 1000; ++tick) history.collect(played, root);
++    EXPECT_EQ(2, lookups);
++    played.append(first); // Defensive deduplication even if the source list repeats an ID.
++    played.append(third);
++    history.collect(played, root);
++    EXPECT_EQ(3, lookups);
++    const auto identity = session->identifier().uuid().toString();
++    ASSERT_EQ(1, history.entries().size());
++    EXPECT_EQ(QString("/usb"), history.entries().value(identity).root);
++    EXPECT_EQ((QList<quint32>{1, 2, 3}), history.entries().value(identity).ids);
++}
++
++TEST_F(Rx3UsbHistoryTest, ReplacementAtSameRootDoesNotMergeOrResurrectDisconnectedHistory) {
++    auto oldSession = std::make_shared<mixxx::rekordbox::SessionState>();
++    auto newSession = std::make_shared<mixxx::rekordbox::SessionState>();
++    auto make = [](quint32 id, const std::shared_ptr<mixxx::rekordbox::SessionState>& session) {
++        return Track::newTemporary(mixxx::FileAccess(mixxx::FileInfo("/tmp/history.wav")),
++                mixxx::TrackUsePolicy::rekordboxUsbPolicy(), mixxx::SourceBinding::rekordboxUsb(id, session));
++    };
++    QList<TrackPointer> played{make(1, oldSession), make(1, newSession)};
++    int lookups = 0;
++    auto root = [&](const mixxx::SourceBinding&) { ++lookups; return QString("/same-mount"); };
++    rx3::UsbHistoryLedger history;
++    history.collect(played, root);
++    ASSERT_EQ(2, history.entries().size());
++    const auto oldIdentity = oldSession->identifier().uuid().toString();
++    const auto newIdentity = newSession->identifier().uuid().toString();
++    oldSession->invalidate();
++    history.forget(oldIdentity);
++    played.append(make(2, oldSession));
++    history.collect(played, root);
++    EXPECT_EQ(2, lookups);
++    EXPECT_FALSE(history.entries().contains(oldIdentity));
++    ASSERT_EQ(1, history.entries().size());
++    EXPECT_EQ((QList<quint32>{1}), history.entries().value(newIdentity).ids);
++}
+diff --git a/src/widget/rx3browserplayback.h b/src/widget/rx3browserplayback.h
+--- a/src/widget/rx3browserplayback.h
++++ b/src/widget/rx3browserplayback.h
+@@ -59,6 +59,40 @@
+     QSet<QString> m_played;
+ };
+ 
++// Consume BrowserPlaybackState's append-only list once. Idle history ticks
++// inspect only active sessions, never previous tracks or the USB catalog.
++class UsbHistoryLedger {
++  public:
++    struct Entry {
++        QString root;
++        QList<quint32> ids;
++        QSet<quint32> seen;
++    };
++    template<typename RootResolver>
++    void collect(const QList<TrackPointer>& played, RootResolver resolveRoot) {
++        while (m_processed < played.size()) {
++            const auto& track = played[m_processed++];
++            if (!track) continue;
++            const auto& binding = track->getSourceBinding();
++            if (binding.sourceType() != mixxx::SourceType::RekordboxUsb || !track->isSourceAvailableForPlayback()) continue;
++            const auto identity = binding.sessionIdentifier().uuid().toString();
++            const auto previous = m_entries.constFind(identity);
++            if (previous != m_entries.cend() && previous->seen.contains(binding.rekordboxId())) continue;
++            const auto root = resolveRoot(binding);
++            if (root.isEmpty()) continue;
++            auto& entry = m_entries[identity];
++            entry.root = root;
++            entry.ids.append(binding.rekordboxId());
++            entry.seen.insert(binding.rekordboxId());
++        }
++    }
++    const QHash<QString, Entry>& entries() const { return m_entries; }
++    void forget(const QString& identity) { m_entries.remove(identity); }
++  private:
++    qsizetype m_processed = 0;
++    QHash<QString, Entry> m_entries;
++};
++
+ class BrowserPlaybackState : public QObject {
+   public:
+     explicit BrowserPlaybackState(QObject* parent) : QObject(parent) {
+diff --git a/src/widget/wrx3browser.h b/src/widget/wrx3browser.h
+--- a/src/widget/wrx3browser.h
++++ b/src/widget/wrx3browser.h
+@@ -1590,6 +1590,7 @@
+     double m_previewPosition=0;
+     QString m_recordingRoot,m_recordingDevice;
+     QHash<QString,int> m_historySaved;
++    rx3::UsbHistoryLedger m_usbHistory;
+     QSet<QString> m_continuousLoads;
+     QSet<QString> m_historyBusy;
+     QString m_historyName=QString("NauticMixxx %1").arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH-mm-ss"));
+diff --git a/src/widget/wrx3browsertools.h b/src/widget/wrx3browsertools.h
+--- a/src/widget/wrx3browsertools.h
++++ b/src/widget/wrx3browsertools.h
+@@ -219,22 +219,27 @@
+         }
+     }
+     if(m_pages->currentWidget()==m_tools) m_tools->refresh();
+-    QHash<QString,QList<quint32>> histories;QHash<QString,QString> roots;
+-    for(const auto& track:m_backend->browserPlaybackState()->playedTracks()) {
+-        const auto& binding=track->getSourceBinding();
+-        if(binding.sourceType()!=mixxx::SourceType::RekordboxUsb || !track->isSourceAvailableForPlayback()) continue;
+-        const auto identity=binding.sessionIdentifier().uuid().toString();
+-        QString root;
+-        if(!m_backend->rekordboxFeature()->infoForLocation(track->getLocation(),&root)) continue;
+-        roots[identity]=root;histories[identity].append(binding.rekordboxId());
+-    }
+-    for(auto it=histories.cbegin();it!=histories.cend();++it) {
+-        if(it->size()<=m_historySaved.value(it.key()) || m_historyBusy.contains(it.key())) continue;
+-        const auto key=it.key();const int count=it->size();m_historyBusy.insert(key);QPointer<WRx3Browser> guard(this);
+-        m_backend->rekordboxFeature()->saveList(roots.value(key),m_historyName,*it,true,[guard,key,count](QString error){
+-            if(!guard) return;guard->m_historyBusy.remove(key);
+-            if(error.isEmpty()) guard->m_historySaved.insert(key,count);
+-            else guard->m_tools->message("USB HISTORY: "+error);
++    auto* feature = m_backend->rekordboxFeature();
++    m_usbHistory.collect(m_backend->browserPlaybackState()->playedTracks(),
++            [feature](const mixxx::SourceBinding& binding) { return feature->rootForBinding(binding); });
++    const auto histories = m_usbHistory.entries();
++    for (auto it = histories.cbegin(); it != histories.cend(); ++it) {
++        const auto key = it.key();
++        if (feature->sessionIdentityForRoot(it->root) != key) {
++            m_usbHistory.forget(key);
++            m_historySaved.remove(key);
++            continue;
++        }
++        const int count = it->ids.size();
++        if (count <= m_historySaved.value(key) || m_historyBusy.contains(key)) continue;
++        m_historyBusy.insert(key);
++        QPointer<WRx3Browser> guard(this);
++        feature->saveList(it->root, m_historyName, it->ids, true, [guard, key, count](QString error) {
++            if (!guard) return;
++            guard->m_historyBusy.remove(key);
++            if (error.isEmpty()) {
++                if (guard->m_usbHistory.entries().contains(key)) guard->m_historySaved.insert(key, count);
++            } else guard->m_tools->message("USB HISTORY: " + error);
+         });
+     }
+ }
