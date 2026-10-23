@@ -123,6 +123,62 @@ use ARM64 but can have incompatible glibc, Qt and codec library versions. Buildi
 directly on the target OS avoids that mismatch. The standard dependency recipe
 also works for a native rebuild on the target.
 
+### Opt-in Pi 4 / Pi 5 optimization profiles
+
+Use these native build entrypoints on a 64-bit Pi desktop OS after installing
+the usual Linux build dependencies:
+
+```sh
+# Cortex-A72 baseline: runs on Pi 4 and Pi 5 with compatible OS libraries.
+./scripts/build-mixxx-rx3-pi4.sh
+
+# Cortex-A76: build and run on Pi 5. This binary is not for Pi 4.
+./scripts/build-mixxx-rx3-pi5.sh
+```
+
+Both wrappers use the existing Linux build/install/test path, including the
+stable desktop launcher and controller backups. They select `-mcpu=cortex-a72`
+or `-mcpu=cortex-a76` explicitly; they do not use the build host's `native`
+instruction set. The default roots end in `-linux-aarch64-pi4` and
+`-linux-aarch64-pi5`, separate from the ordinary portable build. An explicit
+`RX3_BUILD_ROOT` is supported, but reusing a root configured for another CPU
+profile is rejected. Patch changes still require a fresh root.
+
+The Pi profiles also retain the RX3 whole-track waveform as a transparent image
+at the actual display pixel resolution. Repaints reuse that image until the
+track, waveform mode, EQ gains, widget size, reference scale or display pixel
+ratio changes. Play position, cues, divisions and end warnings still repaint
+separately. Each overview retains at most 16 MiB; larger images or allocation
+failure fall back to direct painting. Waveform resolution, frame rate, audio
+settings and existing preferences are not reduced or overwritten. The normal
+Linux, macOS and Windows builds keep their existing rendering path.
+
+LTO is optional because it increases build memory and has not been benchmarked
+for this application. To opt in:
+
+```sh
+RX3_PI_LTO=ON ./scripts/build-mixxx-rx3-pi5.sh
+```
+
+The default is `RX3_PI_LTO=OFF` for both profiles. `RX3_BUILD_JOBS`,
+`RX3_BUILD_TYPE` and `RX3_BUILD_TESTING` work as in the ordinary Linux script.
+Start with one compiler job on low-memory Pis. `stage/rx3-build.json` records the
+CPU profile, selected CPU and LTO setting, including after direct CMake builds.
+
+For direct CMake configuration, use the **patched Mixxx source tree**, not this
+repository's root, with `-DOPTIMIZE=portable -DNAUTIC_PI_PROFILE=pi4` (or `pi5`)
+and optionally `-DNAUTIC_PI_LTO=ON`. Preserve the existing
+`-DCMAKE_PROJECT_INCLUDE=/absolute/path/to/NauticMixxx/packaging/linux/desktop-build.cmake`
+hook and use a separate build root for each profile. The CMake profile defaults
+to `off` and rejects non-ARM64 Linux targets and conflicting `OPTIMIZE` modes.
+CPU profiles do not make binaries portable between incompatible distributions.
+
+Verify the wrappers and compiler configuration with
+`python3 scripts/test-pi-build-profiles.py`; the native `Rx3OverviewCache.*`
+tests check pixel equivalence and cache invalidation. Physical Pi 4 operation,
+GPU rendering, sustained USB audio and end-to-end speedups require separate
+hardware testing; compiler flags alone do not guarantee an improvement.
+
 ### RAM, storage and compiler settings
 
 Start with one compiler job on Pi 4. The recipe disables precompiled headers and

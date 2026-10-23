@@ -708,3 +708,17 @@ occupied endpoints, to avoid counting one extra pixel with Linux font substituti
   Draw images through proxy sorting/filtering while keeping aspect ratios.
 - Cover memory budgets, more than 128 decoded previews, navigation reuse,
   same-ID device isolation, proxy painting and revoked artwork completions.
+
+## 0064 — Opt-in Pi CPU profiles and retained whole-track waveforms
+
+- Add `NAUTIC_PI_PROFILE=off|pi4|pi5` with explicit Cortex-A72 / Cortex-A76
+  compiler flags, ARM64 Linux guards and optional `NAUTIC_PI_LTO`. Normal
+  desktop builds default to `off` and retain their existing flags and renderer.
+- For both Pi profiles, retain one display-resolution RX3 overview image per
+  widget. Invalidate on waveform identity, mode, effective EQ, dimensions,
+  reference scale and device pixel ratio; clear on track/summary changes.
+- Keep moving position/cue/warning overlays separate, weakly reference imported
+  waveforms, and fall back to direct painting above 16 MiB or on allocation
+  failure. Do not alter audio settings, display resolution or frame rate.
+- Test image reuse, invalidation, track lifetime, bounded allocation and pixel
+  equivalence for all three waveform modes at fractional display scales.

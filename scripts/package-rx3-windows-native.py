@@ -17,8 +17,8 @@ NAME = f'NauticMixxx-{VERSION}-Windows-x64-Setup.exe'
 
 def patch_state():
     patches = sorted((ROOT / 'patches').glob('00[0-9][0-9]-*.patch'))
-    if len(patches) != 63:
-        raise ValueError('Expected sixty-three NauticMixxx patches')
+    if len(patches) != 64:
+        raise ValueError('Expected sixty-four NauticMixxx patches')
     return ','.join(digest(p).upper() for p in patches)
 
 

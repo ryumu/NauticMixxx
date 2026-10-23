@@ -8,6 +8,23 @@ import shutil
 import sys
 
 
+def optimization_settings(source: Path) -> dict:
+    cache = source.parent / 'native/CMakeCache.txt'
+    values = {}
+    if cache.is_file():
+        for line in cache.read_text().splitlines():
+            if not line.startswith(('#', '//')) and ':' in line and '=' in line:
+                name, value = line.split('=', 1)
+                values[name.split(':', 1)[0]] = value
+    pi_profile = values.get('NAUTIC_PI_PROFILE', 'off')
+    lto = values.get('NAUTIC_PI_LTO', 'OFF') if pi_profile != 'off' else values.get(
+        'CMAKE_INTERPROCEDURAL_OPTIMIZATION', 'OFF')
+    return dict(optimization=values.get('OPTIMIZE', 'portable'),
+                pi_profile=pi_profile,
+                cpu=values.get('NAUTIC_PI_CPU', ''),
+                lto=lto.upper() in ('ON', 'TRUE', 'YES', '1'))
+
+
 def stage(prefix: Path, source: Path, project: Path) -> None:
     resources = prefix / 'share/mixxx'
     if not (resources / 'controllers').is_dir():
@@ -48,7 +65,8 @@ def stage(prefix: Path, source: Path, project: Path) -> None:
     metadata = dict(product='NauticMixxx', version=(project / 'VERSION').read_text().strip(),
                     architecture=platform.machine(), distribution=(platform.freedesktop_os_release()
                         if platform.system() == 'Linux' else {'ID': 'non-linux-test-fixture'}),
-                    source=f'Mixxx 2.5.6 with {len(list((project / "patches").glob("00[0-9][0-9]-*.patch")))} NauticMixxx patches', optimization='portable',
+                    source=f'Mixxx 2.5.6 with {len(list((project / "patches").glob("00[0-9][0-9]-*.patch")))} NauticMixxx patches',
+                    **optimization_settings(source),
                     icon_sha256=hashlib.sha256(original.read_bytes()).hexdigest(),
                     limitations=['Native distro libraries required; not a universal Linux package',
                                  'Pi 4 GPU, USB audio, controllers and real-time performance untested',

@@ -126,6 +126,37 @@ python3 scripts/test-linux-package.py --stage "build/test-candidate/$(cat VERSIO
 パッチ内容を変えた場合は、新しい `RX3_BUILD_ROOT` を指定します。
 既存ビルド内の手編集は、自動的にリポジトリへ取り込まれません。
 
+## 5.1. Pi向け最適化ビルドを選ぶ場合
+
+Pi 4・5共通版とPi 5専用版は、通常のLinuxビルドとは別のスクリプトで選べます。
+依存パッケージは同じです。Pi 5上では、どちらもビルド・実行できます。
+
+```sh
+# Pi 4・5共通：Cortex-A72向け
+./scripts/build-mixxx-rx3-pi4.sh
+
+# Pi 5専用：Cortex-A76向け。Pi 4では使わないでください。
+./scripts/build-mixxx-rx3-pi5.sh
+```
+
+標準の出力先は、それぞれ `build/test-candidate/<VERSION>-linux-aarch64-pi4/` と
+`build/test-candidate/<VERSION>-linux-aarch64-pi5/` です。通常版とビルドを分離し、
+成功したビルドを既存のデスクトップランチャーへ登録します。実行するファイルは
+各出力先の `stage/bin/nauticmixxx` です。`RX3_BUILD_ROOT` で出力先を変える場合も、
+CPU対象ごとに別のルートを指定します。パッチ変更後は新しいルートを使用します。
+
+両方のPi向けビルドでは、RX3の全曲波形を表示解像度の画像として保持し、同じ波形の
+再計算を減らします。曲・波形の色モード・EQ・サイズ・表示倍率が変わると再生成します。
+再生位置やキュー、終端警告は従来どおり更新します。画像は1ウィジェットあたり最大
+16 MiBで、大きすぎる場合や確保できない場合は従来の直接描画へ戻ります。
+画質・フレームレート・音声設定・保存済みの好みは変更しません。
+通常のLinux版・Windows版・macOS版は従来の描画経路を使います。
+
+LTOは初期状態では無効です。ビルド時のメモリ使用量が増えるので、比較するときだけ
+`RX3_PI_LTO=ON ./scripts/build-mixxx-rx3-pi5.sh` のように指定します。
+CPU対象とLTO設定は `stage/rx3-build.json` に記録します。
+高速化の程度や音切れへの影響は、2デッキ再生中の実機計測で確認する必要があります。
+
 ## 6. 10インチ画面で起動する
 
 Piのデスクトップ上のターミナルで実行します。

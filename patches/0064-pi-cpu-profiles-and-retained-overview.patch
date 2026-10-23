@@ -1,0 +1,365 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -344,6 +344,7 @@
+ set_property(CACHE OPTIMIZE PROPERTY STRINGS "off" "portable" "native" "legacy")
+ string(TOLOWER "${OPTIMIZE}" OPTIMIZE)
+ message(STATUS "Optimization level: ${OPTIMIZE}")
++include(cmake/NauticPi.cmake)
+ 
+ # CMAKE_INTERPROCEDURAL_OPTIMIZATION can be defined to override the default behaviour.
+ # We keep CMAKE_INTERPROCEDURAL_OPTIMIZATION unset (IPO disabled) to save
+@@ -2144,6 +2145,7 @@
+     src/test/rekordboxdevice_test.cpp
+     src/test/rekordboxdiscovery_test.cpp
+     src/test/rx3display_test.cpp
++    src/test/rx3overviewcache_test.cpp
+     src/test/rx3quantize_test.cpp
+     src/test/rx3temporange_test.cpp
+     src/test/rx3browserload_test.cpp
+diff --git a/cmake/NauticPi.cmake b/cmake/NauticPi.cmake
+new file mode 100644
+--- /dev/null
++++ b/cmake/NauticPi.cmake
+@@ -0,0 +1,53 @@
++# Opt-in native Pi profiles. The ordinary desktop builds keep their flags.
++set(NAUTIC_PI_PROFILE "off" CACHE STRING "Pi CPU profile: off, pi4 (also Pi 5), pi5")
++set_property(CACHE NAUTIC_PI_PROFILE PROPERTY STRINGS off pi4 pi5)
++option(NAUTIC_PI_LTO "Enable LTO for the selected Pi profile" OFF)
++set(NAUTIC_PI_CPU "" CACHE INTERNAL "Selected Pi CPU" FORCE)
++if(NOT NAUTIC_PI_PROFILE MATCHES "^(off|pi4|pi5)$")
++  message(FATAL_ERROR "NAUTIC_PI_PROFILE must be off, pi4 or pi5")
++endif()
++if(NAUTIC_PI_PROFILE STREQUAL "off")
++  if(NAUTIC_PI_LTO)
++    message(FATAL_ERROR "NAUTIC_PI_LTO requires a Pi profile")
++  endif()
++  return()
++endif()
++if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
++    NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$" OR
++    NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
++  message(FATAL_ERROR "Pi profiles require 64-bit ARM Linux")
++endif()
++if(NOT CMAKE_C_COMPILER_ID MATCHES "^(GNU|Clang)$" OR
++    NOT CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
++  message(FATAL_ERROR "Pi profiles require GCC or Clang")
++endif()
++if(NOT OPTIMIZE STREQUAL "portable")
++  message(FATAL_ERROR "Pi profiles require OPTIMIZE=portable to avoid conflicting CPU flags")
++endif()
++if(NAUTIC_PI_PROFILE STREQUAL "pi4")
++  set(NAUTIC_PI_CPU cortex-a72 CACHE INTERNAL "Selected Pi CPU" FORCE)
++  set(nautic_pi_number 4)
++else()
++  set(NAUTIC_PI_CPU cortex-a76 CACHE INTERNAL "Selected Pi CPU" FORCE)
++  set(nautic_pi_number 5)
++endif()
++include(CheckCCompilerFlag)
++include(CheckCXXCompilerFlag)
++set(nautic_pi_c_check "NAUTIC_${NAUTIC_PI_PROFILE}_C_SUPPORTED")
++set(nautic_pi_cxx_check "NAUTIC_${NAUTIC_PI_PROFILE}_CXX_SUPPORTED")
++check_c_compiler_flag("-mcpu=${NAUTIC_PI_CPU}" ${nautic_pi_c_check})
++check_cxx_compiler_flag("-mcpu=${NAUTIC_PI_CPU}" ${nautic_pi_cxx_check})
++if(NOT ${nautic_pi_c_check} OR NOT ${nautic_pi_cxx_check})
++  message(FATAL_ERROR "Compiler does not support -mcpu=${NAUTIC_PI_CPU}")
++endif()
++add_compile_options("-mcpu=${NAUTIC_PI_CPU}")
++add_compile_definitions("NAUTIC_PI_PROFILE=${nautic_pi_number}")
++if(NAUTIC_PI_LTO)
++  include(CheckIPOSupported)
++  check_ipo_supported(RESULT nautic_pi_ipo_supported OUTPUT nautic_pi_ipo_error LANGUAGES C CXX)
++  if(NOT nautic_pi_ipo_supported)
++    message(FATAL_ERROR "Pi LTO is unavailable: ${nautic_pi_ipo_error}")
++  endif()
++endif()
++set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ${NAUTIC_PI_LTO})
++message(STATUS "NauticMixxx ${NAUTIC_PI_PROFILE}: ${NAUTIC_PI_CPU}, retained overview, LTO=${NAUTIC_PI_LTO}")
+diff --git a/src/widget/rx3overviewcache.h b/src/widget/rx3overviewcache.h
+new file mode 100644
+--- /dev/null
++++ b/src/widget/rx3overviewcache.h
+@@ -0,0 +1,69 @@
++#pragma once
++
++#include <QImage>
++#include <QPainter>
++#include <array>
++#include <memory>
++
++#include "waveform/rekordboxwaveform.h"
++
++namespace rx3 {
++
++// GUI-thread-only, one image per overview. The imported overview is immutable;
++// signed PCM, play position, cues and warning overlays are not part of this image.
++class OverviewWaveformCache {
++  public:
++    void clear() {
++        m_source.reset();
++        m_image = QImage();
++    }
++
++    template<typename Render>
++    const QImage& image(const std::shared_ptr<const mixxx::rekordbox::WaveformSet>& source,
++            mixxx::rekordbox::WaveformMode mode,
++            QSize pixels,
++            qreal referenceScale,
++            qreal devicePixelRatio,
++            const std::array<float, 3>& gains,
++            Render render) {
++        // Avoid an unbounded allocation on large displays; use direct painting.
++        constexpr qint64 kMaxPixels = 4 * 1024 * 1024; // 16 MiB ARGB
++        if (!source || pixels.isEmpty() || qint64(pixels.width()) * pixels.height() > kMaxPixels) {
++            clear();
++            return m_image;
++        }
++        if (!m_image.isNull() && m_source.lock() == source && m_mode == mode &&
++                m_image.size() == pixels && m_referenceScale == referenceScale &&
++                m_devicePixelRatio == devicePixelRatio && m_gains == gains) {
++            return m_image;
++        }
++        QImage next(pixels, QImage::Format_ARGB32_Premultiplied);
++        if (next.isNull()) {
++            clear();
++            return m_image;
++        }
++        next.fill(Qt::transparent);
++        {
++            QPainter painter(&next);
++            painter.setRenderHint(QPainter::Antialiasing, false);
++            render(&painter);
++        }
++        m_image = std::move(next);
++        m_source = source; // weak ownership does not retain an unloaded track
++        m_mode = mode;
++        m_referenceScale = referenceScale;
++        m_devicePixelRatio = devicePixelRatio;
++        m_gains = gains;
++        return m_image;
++    }
++
++  private:
++    QImage m_image;
++    std::weak_ptr<const mixxx::rekordbox::WaveformSet> m_source;
++    mixxx::rekordbox::WaveformMode m_mode = mixxx::rekordbox::WaveformMode::Blue;
++    qreal m_referenceScale = 0;
++    qreal m_devicePixelRatio = 0;
++    std::array<float, 3> m_gains{};
++};
++
++} // namespace rx3
+diff --git a/src/widget/woverview.h b/src/widget/woverview.h
+--- a/src/widget/woverview.h
++++ b/src/widget/woverview.h
+@@ -17,6 +17,9 @@
+ #include "widget/trackdroptarget.h"
+ #include "widget/wcuemenupopup.h"
+ #include "widget/wwidget.h"
++#if defined(NAUTIC_PI_PROFILE)
++#include "widget/rx3overviewcache.h"
++#endif
+ 
+ class PlayerManager;
+ class QDomNode;
+@@ -197,6 +200,9 @@
+ 
+     QImage m_waveformSourceImage;
+     QImage m_waveformImageScaled;
++#if defined(NAUTIC_PI_PROFILE)
++    rx3::OverviewWaveformCache m_nativeOverviewCache;
++#endif
+ 
+     WaveformSignalColors m_signalColors;
+ 
+diff --git a/src/widget/woverview.cpp b/src/widget/woverview.cpp
+--- a/src/widget/woverview.cpp
++++ b/src/widget/woverview.cpp
+@@ -337,6 +337,9 @@
+ }
+ 
+ void WOverview::slotWaveformSummaryUpdated() {
++#if defined(NAUTIC_PI_PROFILE)
++    m_nativeOverviewCache.clear();
++#endif
+     //qDebug() << "WOverview::slotWaveformSummaryUpdated()";
+ 
+     TrackPointer pTrack(m_pCurrentTrack);
+@@ -394,6 +397,9 @@
+ }
+ 
+ void WOverview::slotLoadingTrack(TrackPointer pNewTrack, TrackPointer pOldTrack) {
++#if defined(NAUTIC_PI_PROFILE)
++    m_nativeOverviewCache.clear();
++#endif
+     Q_UNUSED(pOldTrack); // only used in DEBUG_ASSERT
+     //qDebug() << this << "WOverview::slotLoadingTrack" << pNewTrack.get() << pOldTrack.get();
+     DEBUG_ASSERT(m_pCurrentTrack == pOldTrack);
+@@ -831,21 +837,32 @@
+         pPainter->setRenderHint(QPainter::Antialiasing, false);
+         const int w = qRound(width() * dpr);
+         const int baseline = qRound(rx3::overviewGeometry(height(),m_scaleFactor).signalBottom*dpr);
+-        if (mode!=WaveformMode::ThreeBand) {
+-            const auto& preview=mode==WaveformMode::Blue && !native.overview[1].columns.isEmpty()
+-                    ? native.overview[1] : native.overview[static_cast<int>(mode)];
+-            renderPreviewColumns(preview,mode,w,baseline,gains,
+-                    [&](float x1,float y1,float x2,float y2,QRgb c1,QRgb c2) {
+-                        QLinearGradient gradient(0,y1,0,y2);
+-                        gradient.setColorAt(0,QColor(c1)); gradient.setColorAt(1,QColor(c2));
+-                        pPainter->fillRect(QRectF(x1,y1,x2-x1,y2-y1),gradient);
+-                    },28.f*m_scaleFactor*dpr);
+-        } else renderColumns(native.overview[static_cast<int>(mode)], mode, 0, native.durationSeconds,
+-                w, std::min(float(baseline-1),float(28*m_scaleFactor*dpr)), true, gains,
+-                [&](float x1, float y1, float x2, float y2, QRgb color) {
+-                    const float offset=baseline-1-std::min(float(baseline-1),float(28*m_scaleFactor*dpr));
+-                    pPainter->fillRect(QRectF(x1, offset+std::floor(y1), x2-x1, std::ceil(y2)-std::floor(y1)), QColor(color));
+-                }, &native.overview[2]);
++        const auto paintWaveform = [&](QPainter* waveformPainter) {
++            if (mode!=WaveformMode::ThreeBand) {
++                const auto& preview=mode==WaveformMode::Blue && !native.overview[1].columns.isEmpty()
++                        ? native.overview[1] : native.overview[static_cast<int>(mode)];
++                renderPreviewColumns(preview,mode,w,baseline,gains,
++                        [&](float x1,float y1,float x2,float y2,QRgb c1,QRgb c2) {
++                            QLinearGradient gradient(0,y1,0,y2);
++                            gradient.setColorAt(0,QColor(c1)); gradient.setColorAt(1,QColor(c2));
++                            waveformPainter->fillRect(QRectF(x1,y1,x2-x1,y2-y1),gradient);
++                        },28.f*m_scaleFactor*dpr);
++            } else renderColumns(native.overview[static_cast<int>(mode)], mode, 0, native.durationSeconds,
++                    w, std::min(float(baseline-1),float(28*m_scaleFactor*dpr)), true, gains,
++                    [&](float x1, float y1, float x2, float y2, QRgb color) {
++                        const float offset=baseline-1-std::min(float(baseline-1),float(28*m_scaleFactor*dpr));
++                        waveformPainter->fillRect(QRectF(x1, offset+std::floor(y1), x2-x1, std::ceil(y2)-std::floor(y1)), QColor(color));
++                    }, &native.overview[2]);
++        };
++#if defined(NAUTIC_PI_PROFILE)
++        const auto& image = m_nativeOverviewCache.image(m_pWaveform->rekordbox,
++                mode, QSize(w, qRound(height() * dpr)), m_scaleFactor, dpr, gains, paintWaveform);
++        if (!image.isNull()) {
++            pPainter->drawImage(QPoint(0, 0), image);
++            return;
++        }
++#endif
++        paintWaveform(pPainter);
+         return;
+     }
+ 
+diff --git a/src/test/rx3overviewcache_test.cpp b/src/test/rx3overviewcache_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/test/rx3overviewcache_test.cpp
+@@ -0,0 +1,115 @@
++#include <gtest/gtest.h>
++#include <QLinearGradient>
++
++#include "widget/rx3overviewcache.h"
++
++namespace {
++using namespace mixxx::rekordbox;
++}
++
++TEST(Rx3OverviewCache, RepaintsReusePixelsAndEveryVisualInputInvalidates) {
++    rx3::OverviewWaveformCache cache;
++    std::shared_ptr<const WaveformSet> source = std::make_shared<WaveformSet>();
++    auto mode = WaveformMode::Blue;
++    QSize size(300, 80);
++    qreal scale = 1, dpr = 1;
++    std::array<float, 3> gains{1, 1, 1};
++    int renders = 0;
++    const auto draw = [&] {
++        return cache.image(source, mode, size, scale, dpr, gains, [&](QPainter* painter) {
++            ++renders;
++            painter->fillRect(0, 0, 10, 10, Qt::red);
++        }).cacheKey();
++    };
++    auto key = draw();
++    EXPECT_NE(0, key);
++    for (int repaint = 0; repaint < 100; ++repaint) EXPECT_EQ(key, draw());
++    EXPECT_EQ(1, renders);
++    const auto changed = [&] {
++        const auto next = draw();
++        EXPECT_NE(key, next);
++        key = next;
++        EXPECT_EQ(key, draw());
++    };
++    mode = WaveformMode::RGB; changed();
++    size.setWidth(450); changed();
++    scale = 1.5; changed();
++    dpr = 1.25; changed();
++    gains[1] = 0.5f; changed();
++    source = std::make_shared<WaveformSet>(); changed();
++    EXPECT_EQ(7, renders);
++    cache.clear(); changed();
++    EXPECT_EQ(8, renders);
++}
++
++TEST(Rx3OverviewCache, DoesNotRetainUnloadedTracksAndBoundsImageMemory) {
++    rx3::OverviewWaveformCache cache;
++    auto source = std::make_shared<WaveformSet>();
++    const std::weak_ptr<const WaveformSet> lifetime = source;
++    const std::array<float, 3> gains{1, 1, 1};
++    int renders = 0;
++    const auto draw = [&](QSize size) -> const QImage& {
++        return cache.image(source, WaveformMode::Blue, size, 1, 1, gains,
++                [&](QPainter*) { ++renders; });
++    };
++    EXPECT_FALSE(draw(QSize(300, 80)).isNull());
++    EXPECT_TRUE(draw(QSize(8192, 8192)).isNull());
++    EXPECT_TRUE(draw(QSize()).isNull());
++    EXPECT_EQ(1, renders);
++    EXPECT_FALSE(draw(QSize(300, 80)).isNull());
++    source.reset();
++    EXPECT_TRUE(lifetime.expired());
++    EXPECT_TRUE(draw(QSize(300, 80)).isNull());
++}
++
++TEST(Rx3OverviewCache, CachedPreviewMatchesDirectPixelsAtFractionalDisplayScales) {
++    auto source = std::make_shared<WaveformSet>();
++    auto& preview = source->overview[1];
++    preview.tag = "PWV4";
++    for (int i = 0; i < 1024; ++i) {
++        preview.columns.append(WaveformColumn{quint8(i % 32), quint8(i % 23),
++                quint8(i % 17), quint8(i % 32), quint8(i % 256)});
++    }
++    for (const auto mode : {WaveformMode::Blue, WaveformMode::RGB, WaveformMode::ThreeBand}) {
++        for (const qreal dpr : {1., 1.25, 1.5, 2.}) {
++            SCOPED_TRACE(int(mode));
++            SCOPED_TRACE(dpr);
++            rx3::OverviewWaveformCache cache;
++            const QSize pixels(qRound(300 * dpr), qRound(80 * dpr));
++            const std::array<float, 3> gains{1, 0.7f, 0.5f};
++            int renders = 0;
++            const auto render = [&](QPainter* painter) {
++                ++renders;
++                painter->setRenderHint(QPainter::Antialiasing, false);
++                if (mode == WaveformMode::ThreeBand) {
++                    renderColumns(preview, mode, 0, 1024. / 150, pixels.width(),
++                            28 * dpr, true, gains,
++                            [&](float x1, float y1, float x2, float y2, QRgb color) {
++                                painter->fillRect(QRectF(x1, std::floor(y1), x2 - x1,
++                                        std::ceil(y2) - std::floor(y1)), QColor(color));
++                            });
++                } else {
++                    renderPreviewColumns(preview, mode, pixels.width(), 60 * dpr, gains,
++                            [&](float x1, float y1, float x2, float y2, QRgb c1, QRgb c2) {
++                                QLinearGradient gradient(0, y1, 0, y2);
++                                gradient.setColorAt(0, QColor(c1));
++                                gradient.setColorAt(1, QColor(c2));
++                                painter->fillRect(QRectF(x1, y1, x2 - x1, y2 - y1), gradient);
++                            }, 28 * dpr);
++                }
++            };
++            QImage direct(pixels, QImage::Format_ARGB32_Premultiplied);
++            direct.fill(QColor("#202020"));
++            { QPainter painter(&direct); render(&painter); }
++            for (int repaint = 0; repaint < 3; ++repaint) {
++                const auto& image = cache.image(source, mode, pixels, 1, dpr, gains, render);
++                ASSERT_FALSE(image.isNull());
++                QImage retained(pixels, QImage::Format_ARGB32_Premultiplied);
++                retained.fill(QColor("#202020"));
++                { QPainter painter(&retained); painter.drawImage(QPoint(0, 0), image); }
++                EXPECT_EQ(direct, retained);
++            }
++            EXPECT_EQ(2, renders); // one reference render and one cached render
++        }
++    }
++}

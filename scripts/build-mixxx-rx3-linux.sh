@@ -3,7 +3,20 @@
 set -eu
 project=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 version=$(cat "$project/VERSION")
-work=${RX3_BUILD_ROOT:-"$project/build/test-candidate/$version-linux-$(uname -m)"}
+pi_profile=${RX3_PI_PROFILE:-off}
+pi_lto=${RX3_PI_LTO:-OFF}
+case "$pi_profile" in off|pi4|pi5) ;; *) printf 'RX3_PI_PROFILE must be off, pi4 or pi5.\n' >&2; exit 1 ;; esac
+case "$pi_lto" in ON|OFF) ;; *) printf 'RX3_PI_LTO must be ON or OFF.\n' >&2; exit 1 ;; esac
+suffix=
+if [ "$pi_profile" != off ]; then
+  suffix="-$pi_profile"
+  if [ "$(uname -s)/$(uname -m)" != Linux/aarch64 ]; then
+    printf 'Pi optimization profiles require native 64-bit ARM Linux.\n' >&2; exit 1
+  fi
+elif [ "$pi_lto" = ON ]; then
+  printf 'RX3_PI_LTO requires a Pi optimization profile.\n' >&2; exit 1
+fi
+work=${RX3_BUILD_ROOT:-"$project/build/test-candidate/$version-linux-$(uname -m)$suffix"}
 jobs=${RX3_BUILD_JOBS:-1}
 tests=${RX3_BUILD_TESTING:-ON}
 build_type=${RX3_BUILD_TYPE:-Release}
@@ -17,6 +30,12 @@ fi
 case "$jobs" in ''|*[!0-9]*|0) printf 'RX3_BUILD_JOBS must be a positive integer.\n' >&2; exit 1 ;; esac
 case "$tests" in ON|OFF) ;; *) printf 'RX3_BUILD_TESTING must be ON or OFF.\n' >&2; exit 1 ;; esac
 case "$build_type" in Release|RelWithDebInfo|Debug) ;; *) printf 'RX3_BUILD_TYPE must be Release, RelWithDebInfo or Debug.\n' >&2; exit 1 ;; esac
+if [ -f "$work/native/CMakeCache.txt" ]; then
+  cached_profile=$(sed -n 's/^NAUTIC_PI_PROFILE:STRING=//p' "$work/native/CMakeCache.txt")
+  if [ "${cached_profile:-off}" != "$pi_profile" ]; then
+    printf 'Build root has a different CPU profile; choose a fresh RX3_BUILD_ROOT.\n' >&2; exit 1
+  fi
+fi
 mkdir -p "$work"
 work=$(CDPATH= cd -- "$work" && pwd)
 archive="$work/mixxx-2.5.6.tar.gz"
@@ -46,6 +65,7 @@ cmake -S "$source_tree" -B "$work/native" -G Ninja \
   -DNAUTICMIX_VERSION="$(cat "$project/VERSION")" \
   -DCMAKE_INSTALL_PREFIX="$work/stage" -DCMAKE_INSTALL_LIBDIR=lib \
   -DQT6=ON -DQML=OFF -DOPTIMIZE=portable -DENGINEPRIME=OFF -DKEYFINDER=OFF \
+  -DNAUTIC_PI_PROFILE="$pi_profile" -DNAUTIC_PI_LTO="$pi_lto" \
   -DBUILD_LOW_MEMORY=ON -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON \
   -DBUILD_TESTING="$tests" -DBUILD_BENCH=OFF
 cmake --build "$work/native" --target mixxx --parallel "$jobs"
